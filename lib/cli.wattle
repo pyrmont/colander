@@ -1,0 +1,101 @@
+(import ../deps/gum/args)
+(import ./version)
+
+(def defaults
+  "The settings used when no option is given."
+  {:rules-dir "rules"
+   :output-dir "outputs"
+   :include []
+   :exclude []
+   :stdout? false})
+
+(def config
+  "The configuration for Argy-Bargy"
+  {:rules ["--rules-dir"  {:help    "The directory of rules files."
+                           :default (defaults :rules-dir)
+                           :kind    :single
+                           :proxy   "dir"
+                           :short   "r"}
+           "--output-dir" {:help    "The directory to write feeds to."
+                           :default (defaults :output-dir)
+                           :kind    :single
+                           :proxy   "dir"
+                           :short   "o"}
+           "--stdout"     {:help  "Write feeds to standard output instead."
+                           :kind  :flag
+                           :short "O"}
+           "-------------------------------------------"
+           "--include"    {:help  "Make only this feed. Can be given more than once."
+                           :kind  :multi
+                           :proxy "name"
+                           :short "i"}
+           "--exclude"    {:help  "Make every feed except this one. Can be given more than once."
+                           :kind  :multi
+                           :proxy "name"
+                           :short "e"}
+           "-------------------------------------------"
+           "--version"    {:help  "Show version information."
+                           :kind  :flag
+                           :noex? true
+                           :short "v"}
+           "-------------------------------------------"]
+   :info {:about "Make Atom and RSS feeds from web pages and other feeds."}})
+
+(def- name-peg (peg/compile `(* (+ :w :d "_") (any (+ :w :d (set "_-"))) -1)))
+
+(defn- feed-names [option names]
+  (each name names
+    (assertf (peg/match name-peg name)
+             "%s must name a feed (letters, digits, '_' and '-'): %s" option name))
+  (vec names))
+
+(defn- dir [option s]
+  (assertf (not (empty? s)) "%s must not be empty" option)
+  (if (= "/" s) s (string/trimr s "/")))
+
+(defn settings
+  """
+  Returns the settings in opts, the options from `args/parse-args`, as a map
+  with the keys of `defaults`. Raises an error if a value is invalid.
+  """
+  [opts]
+  (def include (feed-names "--include" (get opts "include" [])))
+  (def exclude (feed-names "--exclude" (get opts "exclude" [])))
+  (assertf (or (empty? include) (empty? exclude))
+           "--include and --exclude cannot be used together")
+  {:rules-dir (dir "--rules-dir" (opts "rules-dir"))
+   :output-dir (dir "--output-dir" (opts "output-dir"))
+   :include include
+   :exclude exclude
+   :stdout? (truthy? (opts "stdout"))})
+
+(defn make-feeds
+  "Makes the feeds that settings select."
+  [settings]
+  (error "making feeds is not implemented yet"))
+
+(defn run [args]
+  (def parsed (args/parse-args "colander" config args))
+  (def err (parsed :err))
+  (def help (parsed :help))
+  (cond
+    (not (empty? help))
+    (do
+      (prin help)
+      (os/exit (if (get-in parsed [:opts "help"]) 0 1)))
+
+    (get-in parsed [:opts "version"])
+    (print version/value)
+
+    (not (empty? err))
+    (do
+      (eprin err)
+      (os/exit 1))
+
+    (try
+      (make-feeds (settings (parsed :opts)))
+      ([e]
+        (eprint "colander: " e)
+        (os/exit 1)))))
+
+(defn main [script & args] (run args))

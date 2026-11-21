@@ -1,0 +1,8 @@
+{:name "colander"
+ :group "net.inqk"
+ :version "DEVEL"
+ :description "Makes Atom and RSS feeds from web pages and other feeds"
+ :author "Michael Camilleri"
+ :license "MIT"
+ :url "https://github.com/pyrmont/colander"
+ :exes [{:type :native :name "colander" :entry "lib/cli.wattle"}]}

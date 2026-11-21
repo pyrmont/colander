@@ -1,0 +1,71 @@
+(import ../deps/gum/test :prefix "")
+
+; These tests run the executable that `wattle build exe` writes, so build it
+; first and run from the project root.
+(def- exe "zig-out/bin/colander")
+
+(unless (= :file (os/stat exe :mode))
+  (error (string "cannot find " exe " (run `wattle build exe` from the project root)")))
+
+; Each run reads standard input from /dev/null, so a run cannot wait for input
+; when the tests run in a terminal.
+(defn- run [& args]
+  (with [null (file/open "/dev/null" :r)]
+    (def env {"PATH" (os/getenv "PATH")
+              :in null :out :pipe :err :pipe})
+    (def proc (os/spawn [exe |args] :pe env))
+    (def out (:read (proc :out) :all))
+    (def err (:read (proc :err) :all))
+    [(os/proc-wait proc) out err]))
+
+(deftest cli-help
+  (def [exit-code out err] (run "--help"))
+  (def msg
+    """
+    Usage: colander [--rules-dir <dir>] [--output-dir <dir>] [--stdout] [--include <name>] [--exclude <name>]
+
+    Make Atom and RSS feeds from web pages and other feeds.
+
+    Options:
+
+     -r, --rules-dir <dir>     The directory of rules files. (Default: rules)
+     -o, --output-dir <dir>    The directory to write feeds to. (Default: outputs)
+     -O, --stdout              Write feeds to standard output instead.
+
+     -i, --include <name>      Make only this feed. Can be given more than once.
+     -e, --exclude <name>      Make every feed except this one. Can be given more than once.
+
+     -v, --version             Show version information.
+
+     -h, --help                Show this help message.
+    """)
+  (is (= 0 exit-code))
+  (is (== (string msg "\n") out))
+  (is (= nil err)))
+
+(deftest cli-version
+  ; The label is :version from info.edn, followed for DEVEL by the commit.
+  (def version (get (first (parse-all (slurp "info.edn"))) :version))
+  (def [exit-code out err] (run "--version"))
+  (is (= 0 exit-code))
+  (is (string/has-prefix? version out))
+  (is (= nil err)))
+
+(deftest cli-bad-option
+  (def [exit-code out err] (run "--bad-option"))
+  (def msg
+    """
+    colander: unrecognized option '--bad-option'
+    Try 'colander --help' for more information.
+    """)
+  (is (= 1 exit-code))
+  (is (= nil out))
+  (is (== (string msg "\n") err)))
+
+(deftest cli-include-and-exclude
+  (def [exit-code out err] (run "-i" "a" "-e" "b"))
+  (is (= 1 exit-code))
+  (is (= nil out))
+  (is (== "colander: --include and --exclude cannot be used together\n" err)))
+
+(run-tests!)

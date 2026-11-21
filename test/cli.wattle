@@ -1,0 +1,37 @@
+(import ../deps/gum/test :prefix "")
+(import ../deps/gum/args)
+(import ../lib/cli)
+
+; Returns the options that parse-args gives for args.
+(defn- opts [& args]
+  (get (args/parse-args "colander" cli/config args) :opts))
+
+(deftest settings-defaults
+  (is (== cli/defaults (cli/settings (opts)))))
+
+(deftest settings-options
+  (def s (cli/settings (opts "-r" "src/rules/" "-o" "../public" "-O"
+                             "-i" "six_colors" "-i" "new-yorker")))
+  (is (== {:rules-dir "src/rules"
+           :output-dir "../public"
+           :include ["six_colors" "new-yorker"]
+           :exclude []
+           :stdout? true}
+          s)))
+
+(deftest settings-exclude
+  (is (== ["a" "b"] (get (cli/settings (opts "-e" "a" "-e" "b")) :exclude))))
+
+(deftest settings-root-dir
+  (is (= "/" (get (cli/settings (opts "-o" "/")) :output-dir))))
+
+(deftest settings-invalid
+  (is (thrown? (cli/settings (opts "-i" "a" "-e" "b"))))
+  (is (thrown? (cli/settings (opts "-i" "../a"))))
+  (is (thrown? (cli/settings (opts "-i" "a.wattle"))))
+  (is (thrown? (cli/settings (opts "-e" "-a"))))
+  (is (thrown? (cli/settings (opts "-e" ""))))
+  (is (thrown? (cli/settings (opts "-r" ""))))
+  (is (thrown? (cli/settings (opts "-o" "")))))
+
+(run-tests!)
