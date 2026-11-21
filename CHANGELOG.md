@@ -3,7 +3,7 @@
 Each release lists what changed since the release before it. The changes made
 since the most recent release are under Unreleased.
 
-## Unreleased
+## 0.1.0 (2026-11-21)
 
 The first release of Colander. It replaces Feedstock, a Ruby library (last
 released as 0.4.0), and the script that ran it for feeds.inqk.net. The

@@ -1,6 +1,6 @@
 {:name "colander"
  :group "net.inqk"
- :version "DEVEL"
+ :version "0.1.0"
  :description "Makes Atom and RSS feeds from web pages and other feeds"
  :author "Michael Camilleri"
  :license "MIT"
