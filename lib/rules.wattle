@@ -1,0 +1,67 @@
+; A rules file is a Wattle file in the rules directory, `<name>.wattle`,
+; that defines `feed`, a map. The feed map is the one that `extract/data`
+; takes (see lib/extract.wattle), with these keys as well:
+;
+; - :url, the page to fetch (required);
+; - :format, :html (the default) or :xml, how to parse the page;
+; - :template, :atom (the default), :podcast or a function (see
+;   lib/template.wattle);
+; - :headers, a map of request headers to send, and :timeout, in seconds.
+;
+; A rules file is compiled in an environment of its own, which has
+; `extract` and `header`, and the bindings of the modules in `exposed`
+; under their prefixes. A rules file cannot import Colander's modules,
+; since a built executable has no module path.
+
+(import ./date)
+(import ./extract)
+(import ./markup)
+(import ./select)
+(import ./template)
+
+(def- module-env (curenv))
+
+(def exposed
+  "The prefixes of the bindings that a rules file can use."
+  ["date/" "markup/" "select/" "template/"])
+
+(defn- rules-env []
+  (def env (make-env))
+  (each [k v] (pairs module-env)
+    (when (and (symbol? k) (find #(string/has-prefix? $ k) exposed))
+      (put! env k v)))
+  (put! env 'extract (module-env 'extract/extract))
+  (put! env 'header (module-env 'extract/header))
+  env)
+
+(defn names
+  "Returns the names of the rules files in dir, in order."
+  [dir]
+  (assertf (= :directory (os/stat dir :mode)) "cannot find the rules directory %s" dir)
+  (sort (seq [f :in (os/dir dir)
+              :when (and (string/has-suffix? ".wattle" f)
+                         (not (string/has-prefix? "." f))
+                         (= :file (os/stat (string dir "/" f) :mode)))]
+          (string/slice f 0 -8))))
+
+(defn- check [feed path]
+  (assertf (map? feed) "%s must define feed as a map" path)
+  (def url (get feed :url))
+  (assertf (string? url) "%s: :url must be a string" path)
+  (assertf (or (nil? (get feed :format)) (has-key? #{:html :xml} (get feed :format)))
+           "%s: :format must be :html or :xml" path)
+  (def t (get feed :template))
+  (assertf (or (nil? t) (function? t) (has-key? template/templates t))
+           "%s: :template must be :atom, :podcast or a function" path)
+  (extract/check feed))
+
+(defn load
+  """
+  Loads the rules file for name in dir and returns its feed map. Raises an
+  error if the file cannot be compiled or does not define a valid feed.
+  """
+  [dir name]
+  (def path (string dir "/" name ".wattle"))
+  (assertf (= :file (os/stat path :mode)) "cannot find %s" path)
+  (def env (dofile path :env (rules-env)))
+  (check (get-in env ['feed :value]) path))

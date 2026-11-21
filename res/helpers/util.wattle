@@ -1,0 +1,31 @@
+; Helpers for the tests, which write only under tmp/test/. Run the tests
+; from the project root.
+
+(defn rmrf
+  "Removes path and, if it is a directory, everything under it."
+  [path]
+  (case (os/lstat path :mode)
+    nil nil
+    :directory (do
+                 (each name (os/dir path) (rmrf (string path "/" name)))
+                 (os/rmdir path))
+    (os/rm path)))
+
+(defn- mkdirp [dir]
+  (var path "")
+  (each part (string/split "/" dir)
+    (set path (if (empty? path) part (string path "/" part)))
+    (unless (or (empty? path) (os/stat path :mode))
+      (os/mkdir path))))
+
+(defn make-dir
+  """
+  Replaces the directory dir with one whose files are given by files, a map
+  of names to contents. Returns dir.
+  """
+  [dir files]
+  (rmrf dir)
+  (mkdirp dir)
+  (each [name content] (pairs files)
+    (spit (string dir "/" name) content))
+  dir)

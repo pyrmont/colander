@@ -1,0 +1,133 @@
+(import ../deps/gum/test :prefix "")
+
+; These tests load the native HTTP module from the shared library that
+; `wattle build lib` writes, so build it first and run from the project root.
+; The module is registered under the name `colander_http`, which is what
+; `lib/http.wattle` imports.
+(def- native
+  (let [[ok? result] (protect (require "../zig-out/lib/libcolander_http"))]
+    (unless ok?
+      (error (string "cannot load the native HTTP module (run `wattle build lib` "
+                     "from the project root): " result)))
+    result))
+(module/add-native "colander_http" native)
+
+(import ../lib/http)
+
+; Starts a server on a free local port. respond is called with the path of
+; each request and returns [status headers body], or nil to answer nothing
+; for a second and then close. Returns [server base-url seen], where seen
+; holds each raw request in :requests.
+(defn- serve [respond]
+  (def seen !{:requests ![]})
+  (defn handle [conn]
+    (def request (string (net/read conn 4096)))
+    (array/push! (seen :requests) request)
+    (def path (get (string/split " " request) 1))
+    (if-let [[status headers body] (respond path)]
+      (do
+        (def head !"")
+        (buffer/push! head "HTTP/1.1 " status "\r\n")
+        (each [k v] headers (buffer/push! head k ": " v "\r\n"))
+        (buffer/push! head "Content-Length: " (string (length body)) "\r\nConnection: close\r\n\r\n")
+        (net/write conn (string head body)))
+      (ev/sleep 1))
+    (net/close conn))
+  (def server (net/server "127.0.0.1" "0" handle))
+  [server (string "http://127.0.0.1:" (get (net/localname server) 1)) seen])
+
+(deftest fetch-status-headers-body
+  (def [server base _] (serve (fn [_] ["200 OK" [["X-Thing" "a"] ["X-Thing" "b"]
+                                                  ["Last-Modified" "Tue, 11 Mar 2025 23:16:16 GMT"]]
+                                       "hello"])))
+  (defer (net/close server)
+    (def r (http/fetch (string base "/page")))
+    (is (= 200 (r :status)))
+    (is (= "hello" (r :body)))
+    (is (= (string base "/page") (r :url)))
+    ; Names are lowercase, and the values of a repeated header are joined.
+    (is (= "a, b" (get-in r [:headers "x-thing"])))
+    (is (= "Tue, 11 Mar 2025 23:16:16 GMT" (get-in r [:headers "last-modified"])))))
+
+(deftest fetch-sends-headers
+  (def [server base seen] (serve (fn [_] ["200 OK" [] "ok"])))
+  (defer (net/close server)
+    (http/fetch (string base "/") :headers {"Accept" "text/html"})
+    (def request ((seen :requests) 0))
+    (is (string/has-prefix? "GET / HTTP/1.1" request))
+    (is (string/find (string "User-Agent: " http/user-agent "\r\n") request))
+    (is (string/find "Accept: text/html\r\n" request))
+    (is (string/find "gzip" request))))
+
+(deftest fetch-replaces-user-agent
+  (def [server base seen] (serve (fn [_] ["200 OK" [] "ok"])))
+  (defer (net/close server)
+    (http/fetch (string base "/") :headers {"User-Agent" "Mozilla/5.0"})
+    (def request ((seen :requests) 0))
+    (is (string/find "User-Agent: Mozilla/5.0\r\n" request))
+    (is (not (string/find "Colander" request)))))
+
+(deftest fetch-not-ok
+  ; A status that is not 2xx is returned, not raised.
+  (def [server base _] (serve (fn [_] ["403 Forbidden" [] "no"])))
+  (defer (net/close server)
+    (is (= 403 ((http/fetch (string base "/")) :status)))))
+
+(deftest fetch-redirects
+  (def [server base _]
+    (serve (fn [path]
+             (case path
+               "/old" ["301 Moved Permanently" [["Location" "/new"]] ""]
+               "/new" ["302 Found" [["Location" "/newer?x=1"]] ""]
+               ["200 OK" [] (string "at " path)]))))
+  (defer (net/close server)
+    (def r (http/fetch (string base "/old")))
+    (is (= 200 (r :status)))
+    (is (= "at /newer?x=1" (r :body)))
+    (is (= (string base "/newer?x=1") (r :url)))
+    (is (thrown? (http/fetch (string base "/old") :redirects 1)))))
+
+(deftest fetch-redirect-loop
+  (def [server base _] (serve (fn [_] ["302 Found" [["Location" "/again"]] ""])))
+  (defer (net/close server)
+    (def [ok? e] (protect (http/fetch (string base "/"))))
+    (is (not ok?))
+    (is (= "too many redirects" e))))
+
+(deftest fetch-decompresses
+  (def gzipped "\x1F\x8B\x08\x00\x00\x00\x00\x00\x00\xFF\xCB\x48\xCD\xC9\xC9\x57\x48\xAF\xCA\x2C\x00\x00\x19\x6A\xD2\xDF\x0A\x00\x00\x00")
+  (def deflated "\x78\x9C\xCB\x48\xCD\xC9\xC9\x57\x48\x49\x4D\xCB\x49\x2C\x49\x05\x00\x23\x0C\x05\x0A")
+  (def [server base _]
+    (serve (fn [path]
+             (if (= path "/gzip")
+               ["200 OK" [["Content-Encoding" "gzip"]] gzipped]
+               ["200 OK" [["Content-Encoding" "deflate"]] deflated]))))
+  (defer (net/close server)
+    (is (= "hello gzip" ((http/fetch (string base "/gzip")) :body)))
+    (is (= "hello deflate" ((http/fetch (string base "/deflate")) :body)))))
+
+(deftest fetch-limit
+  (def [server base _] (serve (fn [_] ["200 OK" [] (string/repeat "x" 100)])))
+  (defer (net/close server)
+    (is (= 100 (length ((http/fetch (string base "/") :limit 100) :body))))
+    (def [ok? e] (protect (http/fetch (string base "/") :limit 99)))
+    (is (not ok?))
+    (is (= "response body too large" e))))
+
+(deftest fetch-timeout
+  (def [server base _] (serve (fn [_] nil)))
+  (defer (net/close server)
+    (def t0 (os/clock :monotonic))
+    (def [ok? e] (protect (http/fetch (string base "/") :timeout 0.2)))
+    (is (not ok?))
+    (is (string/has-prefix? "timed out after" e))
+    (is (< (- (os/clock :monotonic) t0) 0.9))))
+
+(deftest fetch-failures
+  ; Port 1 is reserved and nothing listens on it.
+  (is (thrown? (http/fetch "http://127.0.0.1:1/")))
+  (is (thrown? (http/fetch "ftp://example.org/")))
+  (is (thrown? (http/fetch "/local/path")))
+  (is (thrown? (http/fetch "http://127.0.0.1:1/" :headers {"Bad\nName" "x"}))))
+
+(run-tests!)

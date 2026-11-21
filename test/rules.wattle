@@ -1,0 +1,64 @@
+(import ../deps/gum/test :prefix "")
+(import ../res/helpers/util :as h)
+(import ../lib/rules)
+
+(def- dir "tmp/test/rules")
+
+; Returns the message of the error that f raises.
+(defn- message [f]
+  (def [ok? e] (protect (f)))
+  (when ok? (error "expected an error"))
+  (string e))
+
+(deftest names-in-order
+  (h/make-dir dir {"b.wattle" "" "a.wattle" "" ".hidden.wattle" "" "notes.txt" ""})
+  (is (== ["a" "b"] (rules/names dir)))
+  (h/rmrf dir))
+
+(deftest names-missing-dir
+  (h/rmrf dir)
+  (is (thrown? (rules/names dir))))
+
+(deftest load-feed
+  (h/make-dir dir {"a.wattle"
+                   """
+                   (def- base "https://example.org")
+                   (def feed
+                     {:url (string base "/")
+                      :format :xml
+                      :info [[:title "A"]]
+                      :entries (extract "item")
+                      :entry [[:title (extract "title" :process (fn [s _] (markup/decode s)))]
+                              [:updated (header "Last-Modified" :type :datetime)]]})
+                   """})
+  (def feed (rules/load dir "a"))
+  (is (= "https://example.org/" (feed :url)))
+  (is (= :xml (feed :format)))
+  (is (= :extract ((feed :entries) :rule)))
+  (h/rmrf dir))
+
+(deftest load-cannot-see-colander
+  ; A rules file gets only `extract`, `header` and the exposed prefixes.
+  (h/make-dir dir {"a.wattle" "(def feed {:url \"https://example.org/\" :info [[:t (rules/names \".\")]]})"})
+  (is (thrown? (rules/load dir "a")))
+  (h/rmrf dir))
+
+(deftest load-errors
+  (h/make-dir dir {"none.wattle" "(def x 1)"
+                   "vector.wattle" "(def feed [])"
+                   "nourl.wattle" "(def feed {:info []})"
+                   "format.wattle" "(def feed {:url \"https://example.org/\" :format :json})"
+                   "template.wattle" "(def feed {:url \"https://example.org/\" :template :rss})"
+                   "field.wattle" "(def feed {:url \"https://example.org/\" :info [[:t 1]]})"
+                   "syntax.wattle" "(def feed {:url"})
+  (is (string/find "must define feed as a map" (message #(rules/load dir "none"))))
+  (is (string/find "must define feed as a map" (message #(rules/load dir "vector"))))
+  (is (string/find ":url must be a string" (message #(rules/load dir "nourl"))))
+  (is (string/find ":format must be" (message #(rules/load dir "format"))))
+  (is (string/find ":template must be" (message #(rules/load dir "template"))))
+  (is (thrown? (rules/load dir "field")))
+  (is (thrown? (rules/load dir "syntax")))
+  (is (string/find "cannot find" (message #(rules/load dir "missing"))))
+  (h/rmrf dir))
+
+(run-tests!)

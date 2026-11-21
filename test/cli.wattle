@@ -1,5 +1,12 @@
 (import ../deps/gum/test :prefix "")
+
+; lib/cli.wattle imports the native HTTP module, so these tests need the
+; shared library that `wattle build lib` writes. They do not fetch anything:
+; make-feeds is given a :fetch that returns pages from `pages`.
+(module/add-native "colander_http" (require "../zig-out/lib/libcolander_http"))
+
 (import ../deps/gum/args)
+(import ../res/helpers/util :as h)
 (import ../lib/cli)
 
 ; Returns the options that parse-args gives for args.
@@ -33,5 +40,87 @@
   (is (thrown? (cli/settings (opts "-e" ""))))
   (is (thrown? (cli/settings (opts "-r" ""))))
   (is (thrown? (cli/settings (opts "-o" "")))))
+
+(def- dir "tmp/test/cli")
+
+(def- rules
+  {"good.wattle"
+   """
+   (def feed {:url "https://example.org/good" :info [[:title "Good"]]
+              :entries (extract "li") :entry [[:title (extract "")]]})
+   """
+   "empty.wattle"
+   """
+   (def feed {:url "https://example.org/empty" :info [[:title "Empty"]]
+              :entries (extract "li") :entry [[:title (extract "")]]})
+   """
+   "gone.wattle"
+   """
+   (def feed {:url "https://example.org/gone" :info [] :entry []})
+   """
+   "broken.wattle" "(def feed {:url"})
+
+(def- pages
+  {"https://example.org/good" {:status 200 :headers {} :body "<ul><li>A<li>B</ul>"}
+   "https://example.org/empty" {:status 200 :headers {} :body "<p>nothing</p>"}
+   "https://example.org/gone" {:status 404 :headers {} :body ""}})
+
+(defn- fetch [url & _] (pages url))
+
+(defn- settings [& changes]
+  (h/make-dir (string dir "/rules") rules)
+  (merge cli/defaults {:rules-dir (string dir "/rules") :output-dir (string dir "/out")
+                       :fetch fetch}
+         (table |changes)))
+
+; Runs make-feeds with settings and returns [failures stdout stderr].
+(defn- run-feeds [s]
+  (def out !"")
+  (def err !"")
+  (def failures (with-dyns [:out out :err err] (cli/make-feeds s)))
+  [failures (string out) (string err)])
+
+(deftest feed-names
+  (is (== ["broken" "empty" "gone" "good"] (cli/feed-names (settings))))
+  (is (== ["good" "empty"] (cli/feed-names (settings :include ["good" "empty"]))))
+  (is (== ["empty" "good"] (cli/feed-names (settings :exclude ["broken" "gone"]))))
+  (is (thrown? (cli/feed-names (settings :include ["nope"]))))
+  (is (thrown? (cli/feed-names (settings :exclude ["nope"]))))
+  (h/rmrf dir))
+
+(deftest make-feeds-writes-files
+  (def [failures out err] (run-feeds (settings :include ["good"])))
+  (is (= 0 failures))
+  (is (= "" out))
+  (is (= "" err))
+  (def feed (slurp (string dir "/out/good.xml")))
+  (is (string/find "<title>Good</title>" feed))
+  (is (string/find "<entry>\n    <title>B</title>\n  </entry>" feed))
+  ; Nothing is left beside the file.
+  (is (== ["good.xml"] (os/dir (string dir "/out"))))
+  (h/rmrf dir))
+
+(deftest make-feeds-failures
+  (def s (settings))
+  (h/make-dir (s :output-dir) {"gone.xml" "old" "broken.xml" "old"})
+  (def [failures out err] (run-feeds s))
+  ; A feed that fails keeps its old file, and the others are still made.
+  (is (= 2 failures))
+  (is (== "old" (slurp (string dir "/out/gone.xml"))))
+  (is (== "old" (slurp (string dir "/out/broken.xml"))))
+  (is (string/find "<title>Good</title>" (slurp (string dir "/out/good.xml"))))
+  (is (string/find "colander: gone: https://example.org/gone answered with status 404\n" err))
+  (is (string/find "colander: broken: " err))
+  ; A feed with no entries is written, with a warning.
+  (is (string/find "colander: empty: warning: the feed has no entries\n" err))
+  (is (string/find "<title>Empty</title>" (slurp (string dir "/out/empty.xml"))))
+  (h/rmrf dir))
+
+(deftest make-feeds-stdout
+  (def [failures out err] (run-feeds (settings :include ["good"] :stdout? true)))
+  (is (= 0 failures))
+  (is (string/has-prefix? "<?xml" out))
+  (is (= nil (os/stat (string dir "/out") :mode)))
+  (h/rmrf dir))
 
 (run-tests!)

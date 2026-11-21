@@ -5,4 +5,5 @@
  :author "Michael Camilleri"
  :license "MIT"
  :url "https://github.com/pyrmont/colander"
- :exes [{:type :native :name "colander" :entry "lib/cli.wattle"}]}
+ :exes [{:type :native :name "colander" :entry "lib/cli.wattle"}]
+ :libs [{:type :native :name "colander_http" :root "src/http.zig" :for ["colander"]}]}

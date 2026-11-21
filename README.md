@@ -7,8 +7,8 @@ This repository provides `colander`, a command-line utility written in the
 
 [Wattle]: https://github.com/pyrmont/wattle
 
-Colander replaces [Feedstock][], a Ruby library. It is in development and
-does not make feeds yet.
+Colander replaces [Feedstock][], a Ruby library. It is in development: it
+makes feeds, but the format of rules files may still change.
 
 [Feedstock]: https://github.com/pyrmont/feedstock
 

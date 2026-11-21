@@ -1,4 +1,9 @@
 (import ../deps/gum/args)
+(import ./extract)
+(import ./http)
+(import ./markup)
+(import ./rules)
+(import ./template)
 (import ./version)
 
 (def defaults
@@ -69,10 +74,76 @@
    :exclude exclude
    :stdout? (truthy? (opts "stdout"))})
 
-(defn make-feeds
-  "Makes the feeds that settings select."
+(defn feed-names
+  """
+  Returns the names of the feeds that settings select: those given with
+  `--include`, in that order, or every rules file except those given with
+  `--exclude`. Raises an error if a name given has no rules file.
+  """
   [settings]
-  (error "making feeds is not implemented yet"))
+  (def all (rules/names (settings :rules-dir)))
+  (def known (reduce conj #{} all))
+  (each name [|(settings :include) |(settings :exclude)]
+    (assertf (has-key? known name) "no rules file for %s in %s" name (settings :rules-dir)))
+  (if (empty? (settings :include))
+    (filter #(not (has-value? (settings :exclude) $)) all)
+    (settings :include)))
+
+(defn make-feed
+  """
+  Returns the feed for the rules file name, and the number of its entries.
+  fetch is the function that fetches the page, `http/fetch` by default.
+  """
+  [settings name]
+  (def fetch (get settings :fetch http/fetch))
+  (def feed (rules/load (settings :rules-dir) name))
+  (def response (fetch (feed :url) :headers (get feed :headers)
+                       :timeout (get feed :timeout)))
+  (def status (response :status))
+  (assertf (<= 200 status 299) "%s answered with status %d" (feed :url) status)
+  (def mode (get feed :format :html))
+  (def root (markup/parse (response :body) mode))
+  (def data (extract/data feed root :mode mode :headers (response :headers)))
+  [(template/render (get feed :template :atom) data) (length (data :entries))])
+
+(defn- write-file [dir name contents]
+  ; The feed is written beside its file and renamed into place, so that a
+  ; reader never sees part of it.
+  (def path (string dir "/" name ".xml"))
+  (def temp (string dir "/." name ".xml.colander-new"))
+  (try
+    (do
+      (spit temp contents)
+      (os/rename temp path))
+    ([e]
+      (when (os/stat temp :mode) (os/rm temp))
+      (error e))))
+
+(defn make-feeds
+  """
+  Makes the feeds that settings select, writing each to the output
+  directory or to standard output. A feed that fails is reported on stderr
+  and its file is left as it was. Returns the number of feeds that failed.
+  """
+  [settings]
+  (def names (feed-names settings))
+  (def dir (settings :output-dir))
+  (unless (or (settings :stdout?) (= :directory (os/stat dir :mode)))
+    (os/mkdir dir))
+  (var failures 0)
+  (each name names
+    (try
+      (let [[contents n] (make-feed settings name)]
+        (when (zero? n)
+          (eprint "colander: " name ": warning: the feed has no entries"))
+        (if (settings :stdout?)
+          (prin contents)
+          (write-file dir name contents)))
+      ([e]
+        (eprint "colander: " name ": " e)
+        (++ failures))))
+  (flush)
+  failures)
 
 (defn run [args]
   (def parsed (args/parse-args "colander" config args))
@@ -92,10 +163,11 @@
       (eprin err)
       (os/exit 1))
 
-    (try
-      (make-feeds (settings (parsed :opts)))
-      ([e]
-        (eprint "colander: " e)
-        (os/exit 1)))))
+    (let [failures (try
+                     (make-feeds (settings (parsed :opts)))
+                     ([e]
+                       (eprint "colander: " e)
+                       (os/exit 1)))]
+      (when (pos? failures) (os/exit 1)))))
 
 (defn main [script & args] (run args))

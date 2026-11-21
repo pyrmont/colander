@@ -1,0 +1,41 @@
+; Fetching pages, with the native module `colander_http` (src/http.zig).
+
+(import colander_http)
+(import ./version)
+
+(def defaults
+  "The limits used when a request gives none: seconds, bytes and redirects."
+  {:timeout 30 :limit (* 16 1024 1024) :redirects 5})
+
+(def user-agent
+  "The User-Agent header sent with every request."
+  (string "Colander/" version/value " (+https://github.com/pyrmont/colander)"))
+
+(defn fetch
+  """
+  Fetches url with a GET request and returns a map with :status, :headers
+  (lowercase names to values), :url (after any redirects) and :body. Raises
+  an error if the request fails, takes longer than :timeout seconds, has a
+  body larger than :limit bytes or is redirected more than :redirects times.
+  :headers adds request headers. A response with a status that is not 2xx is
+  returned, not raised.
+  """
+  [url & {:keys [timeout limit redirects headers]}]
+  (assertf (or (string/has-prefix? "https://" url) (string/has-prefix? "http://" url))
+           "URL must begin with http:// or https://: %s" url)
+  (def request-headers (reduce (fn [m [k v]] (assoc m k v))
+                               {"User-Agent" user-agent}
+                               (pairs (or headers {}))))
+  (def response
+    (try
+      (ev/with-deadline (or timeout (defaults :timeout))
+        (colander_http/get url request-headers
+                           (or limit (defaults :limit))
+                           (or redirects (defaults :redirects))))
+      ([e]
+        (if (= e "deadline expired")
+          (error (string "timed out after " (or timeout (defaults :timeout)) " seconds"))
+          (error e)))))
+  (when-let [e (get response :error)]
+    (error e))
+  response)
