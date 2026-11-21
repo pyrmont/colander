@@ -1,0 +1,112 @@
+; The templates that write a feed from the data that `extract/data` returns.
+;
+; :atom follows Feedstock's `default.xml` and :podcast the `podcast.xml` of
+; feeds.inqk.net, line for line, except that every text value is escaped.
+; Each value is written by its mode: :text escaped, :cdata in a CDATA
+; section and :markup as it is. A value whose mode is :markup is written on
+; its own line, whatever its name, as an enclosure element is.
+
+(def- escapes {"&" "&amp;" "<" "&lt;" ">" "&gt;" "\"" "&quot;" "'" "&#39;"})
+
+(def- escape-peg
+  (peg/compile `(% (any (+ (/ (<- (set "&<>\"'")) ~escapes) (<- 1))))))
+
+(defn escape
+  """
+  Returns s with `&`, `<`, `>`, `"` and `'` escaped, as Ruby's
+  `CGI.escapeHTML` does.
+  """
+  [s]
+  (if (peg/match `(to (set "&<>\"'")) s)
+    (first (peg/match escape-peg s))
+    s))
+
+(defn cdata
+  "Returns s in a CDATA section. A `]]>` in s is split across two sections."
+  [s]
+  (string "<![CDATA[" (string/replace-all "]]>" "]]]]><![CDATA[>" s) "]]>"))
+
+(defn- out [value mode]
+  (case mode
+    :cdata (cdata value)
+    :markup value
+    (escape value)))
+
+(defn- element [buf indent name value mode & {:keys [attrs]}]
+  (buffer/push! buf indent "<" name (or attrs "") ">" (out value mode)
+                "</" name ">\n"))
+
+; Atom elements that are text constructs, which say with `type` whether
+; their contents are text or HTML.
+(def- atom-text #{"title" "subtitle" "summary" "content" "rights"})
+
+(defn- atom-field [buf indent [k value mode]]
+  (def name (string k))
+  (cond
+    (= mode :markup) (buffer/push! buf indent value "\n")
+    (= name "author")
+    (buffer/push! buf indent "<author><name>" (out value mode) "</name></author>\n")
+    (= name "link")
+    (buffer/push! buf indent "<link href=\"" (escape value) "\" rel=\"alternate\" />\n")
+    (element buf indent name value mode
+             :attrs (when (and (= mode :cdata) (has-key? atom-text name))
+                      " type=\"html\""))))
+
+(defn atom
+  "Returns the feed in data as an Atom document."
+  [data]
+  (def buf !"")
+  (buffer/push! buf "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
+                "<feed xmlns=\"http://www.w3.org/2005/Atom\">\n")
+  (each f (data :info) (atom-field buf "  " f))
+  (each entry (data :entries)
+    (buffer/push! buf "  <entry>\n")
+    (each f entry (atom-field buf "    " f))
+    (buffer/push! buf "  </entry>\n"))
+  (buffer/push! buf "</feed>\n")
+  (string buf))
+
+(defn- podcast-field [buf indent [k value mode]]
+  (def name (string k))
+  (cond
+    (= mode :markup) (buffer/push! buf indent value "\n")
+    (= name "itunes:category")
+    (buffer/push! buf indent "<itunes:category text=\"" (escape value) "\"/>\n")
+    (= name "itunes:image")
+    (buffer/push! buf indent "<itunes:image href=\"" (escape value) "\"/>\n")
+    (= name "guid")
+    (element buf indent name value mode :attrs " isPermaLink=\"false\"")
+    (element buf indent name value mode)))
+
+(defn podcast
+  "Returns the feed in data as an RSS 2.0 document with iTunes elements."
+  [data]
+  (def buf !"")
+  (buffer/push! buf "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                "<rss version=\"2.0\" xmlns:itunes=\"http://www.itunes.com/dtds/podcast-1.0.dtd\" xmlns:content=\"http://purl.org/rss/1.0/modules/content/\">\n"
+                "  <channel>\n")
+  (each f (data :info) (podcast-field buf "    " f))
+  (each entry (data :entries)
+    (buffer/push! buf "    <item>\n")
+    (each f entry (podcast-field buf "      " f))
+    (buffer/push! buf "    </item>\n"))
+  (buffer/push! buf "  </channel>\n</rss>\n")
+  (string buf))
+
+(def templates
+  "The built-in templates, by name."
+  {:atom atom :podcast podcast})
+
+(defn render
+  """
+  Returns the feed in data written with template, the name of a built-in
+  template or a function from data to a string.
+  """
+  [template data]
+  (def f (if (function? template)
+           template
+           (or (get templates template)
+               (errorf "unknown template: %p" template))))
+  (def s (f data))
+  (assertf (string? s) "a template must return a string: %p" s)
+  s)

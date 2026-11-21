@@ -82,7 +82,7 @@
       "<item><itunes:image href=\"u\"/><content:encoded>c</content:encoded></item>"
       :xml))
   (is (== ["c"] (texts feed "content|encoded")))
-  (is (= "u" (get ((select/select-1 feed (select/compile "item itunes|image")) :attrs) "href"))))
+  (is (= "u" (markup/attr (select/select-1 feed (select/compile "item itunes|image")) "href"))))
 
 (deftest select-whitespace
   (is (== ["A" "B"] (texts page "  li>a ")))

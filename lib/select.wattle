@@ -13,6 +13,8 @@
 ; combinator is :desc or :child, and is ignored on the first step. A
 ; compound is a map with any of :tag, :id, :classes and :attrs.
 
+(import ./markup)
+
 (def- grammar
   (peg/compile
     `{:ws (any (set " \t\r\n"))
@@ -73,8 +75,8 @@
 (defn- has-word? [value word]
   (and value (some-of #(= $ word) (peg/match word-peg value))))
 
-(defn- attr-match? [attrs [name op value]]
-  (def v (get attrs name))
+(defn- attr-match? [el [name op value]]
+  (def v (markup/attr el name))
   (and v
        (case op
          nil true
@@ -85,11 +87,10 @@
          "*=" (and (not (empty? value)) (not (nil? (string/find value v)))))))
 
 (defn- compound-match? [c el]
-  (def attrs (el :attrs))
   (and (or (nil? (c :tag)) (= (c :tag) (el :tag)))
-       (or (nil? (c :id)) (= (c :id) (get attrs "id")))
-       (every-of #(has-word? (get attrs "class") $) (get c :classes []))
-       (every-of #(attr-match? attrs $) (get c :attrs []))))
+       (or (nil? (c :id)) (= (c :id) (markup/attr el "id")))
+       (every-of #(has-word? (markup/attr el "class") $) (get c :classes []))
+       (every-of #(attr-match? el $) (get c :attrs []))))
 
 ; Returns true if el, whose ancestors are the first plen elements of path,
 ; matches the steps of an alternative up to step i.

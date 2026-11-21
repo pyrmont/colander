@@ -1,0 +1,113 @@
+; Dates in the forms that web pages and feeds write them, read into a time
+; (seconds since the epoch) and an offset (seconds east of UTC), and written
+; out as RFC 3339.
+;
+; `parse` reads:
+;
+; - ISO 8601 and RFC 3339: `2026-11-20`, `2026-11-20T19:59:45+00:00`,
+;   `2026-11-20 19:59:45.5Z`
+; - RFC 822 and HTTP dates: `Fri, 20 Nov 2026 19:59:45 +0000`, `... GMT`
+; - `November 23, 2026`, `Nov 23 2026`, `November 23rd, 2026`
+; - `1 October 2026`, `1 Mar 2016`
+; - `11/23/2026` (month first, as Timeliness reads it)
+;
+; Month and day names may be written in full or in three letters, in any
+; case. A date written without an offset is in the local time zone, as
+; Timeliness (which Feedstock used) reads it, and a date without a time is
+; midnight.
+
+(def- months
+  ["january" "february" "march" "april" "may" "june" "july" "august"
+   "september" "october" "november" "december"])
+
+(def- month-rule
+  `(+ (/ (* "sept" (? ".")) 9)
+      ~|(map (fn [i]
+               (def name (months i))
+               `(/ (* (+ ~name ~(string/slice name 0 3)) (? ".")) ~(inc i)))
+             (range 12))))
+
+(def- zones
+  {"z" 0 "ut" 0 "utc" 0 "gmt" 0
+   "est" (* -5 3600) "edt" (* -4 3600) "cst" (* -6 3600) "cdt" (* -5 3600)
+   "mst" (* -7 3600) "mdt" (* -6 3600) "pst" (* -8 3600) "pdt" (* -7 3600)})
+
+(defn- offset-value [sign h m]
+  (* (if (= "-" sign) -1 1) (+ (* 3600 h) (* 60 m))))
+
+(def- grammar
+  (peg/compile
+    `{:ws (some (set " \t\r\n"))
+      :d2 (number (between 1 2 :d))
+      :year (* (constant :year) (number (4 :d)))
+      :month-number (* (constant :month) :d2)
+      :month-name (* (constant :month) ~month-rule)
+      :day (* (constant :day) :d2 (? (+ "st" "nd" "rd" "th")))
+      :day-name (* (some :a) (? ",") :ws)
+      :time (* (constant :hours) :d2 ":"
+               (constant :minutes) (number (2 :d))
+               (? (* ":" (constant :seconds) (number (2 :d))
+                     (? (* (set ".,") (some :d))))))
+      :zone (* (constant :offset)
+               (+ (/ (* (<- (set "+-")) (number (2 :d)) (? ":") (number (2 :d)))
+                     ~offset-value)
+                  (/ (<- (+ "utc" "ut" "gmt" "z" "est" "edt" "cst" "cdt"
+                            "mst" "mdt" "pst" "pdt"))
+                     ~zones)))
+      :iso (* :year "-" :month-number "-" :day
+              (? (* (+ "t" :ws) :time (any " ") (? :zone))))
+      :rfc822 (* (? :day-name) :day :ws :month-name :ws :year
+                 (? (* :ws :time (? (* :ws :zone)))))
+      :dmy (* :day :ws :month-name (? ",") :ws :year)
+      :mdy (* :month-name :ws :day (? ",") :ws :year)
+      :slash (* :month-number "/" :day "/" :year)
+      :main (* (any " ") (+ :iso :rfc822 :dmy :mdy :slash) (any " ") -1)}))
+
+(defn local-offset
+  "Returns the offset of the local time zone at time, in seconds."
+  [time]
+  (- (os/mktime (os/date time true)) time))
+
+(defn parse
+  """
+  Returns the date in s as a map with :time, in seconds since the epoch,
+  and :offset, in seconds, or nil if s is not a date in one of the forms
+  above. Fractions of a second are dropped.
+  """
+  [s]
+  (when-let [caps (peg/match grammar (string/ascii-lower s))]
+    (def d (table |caps))
+    (def {:keys [year month day hours minutes seconds]
+          :or {hours 0 minutes 0 seconds 0}} d)
+    (when (and (<= 1 month 12) (<= 1 day 31) (< hours 24) (< minutes 60)
+               (< seconds 61))
+      (def fields {:year year :month (dec month) :month-day (dec day)
+                   :hours hours :minutes minutes :seconds seconds})
+      (def offset (get d :offset))
+      (def time (if offset
+                  (- (os/mktime fields) offset)
+                  (os/mktime fields true)))
+      (def offset (or offset (local-offset time)))
+      ; A day past the end of its month, such as 31 April, becomes a day in
+      ; the next month.
+      (when (= (dec day) (get (os/date (+ time offset)) :month-day))
+        {:time time :offset offset}))))
+
+(defn format-offset
+  "Returns the offset in seconds as `+HH:MM`."
+  [offset]
+  (def m (math/floor (/ (math/abs offset) 60)))
+  (string/format "%s%02d:%02d" (if (neg? offset) "-" "+")
+                 (math/floor (/ m 60)) (% m 60)))
+
+(defn rfc3339
+  """
+  Returns the date d, a map from `parse`, in the form of RFC 3339, as in
+  `2026-11-20T19:59:45+09:00`.
+  """
+  [d]
+  (def f (os/date (+ (d :time) (d :offset))))
+  (string (string/format "%04d-%02d-%02dT%02d:%02d:%02d"
+                         (f :year) (inc (f :month)) (inc (f :month-day))
+                         (f :hours) (f :minutes) (f :seconds))
+          (format-offset (d :offset))))

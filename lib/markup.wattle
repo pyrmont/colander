@@ -1,8 +1,9 @@
 ; A lenient HTML and XML parser.
 ;
-; `parse` returns a tree. An element is a map, {:tag "div" :attrs {"class"
-; "a"} :children [...]}, and a text node is a string with its character
-; references decoded. Comments, doctypes and processing instructions are
+; `parse` returns a tree. An element is a map, {:tag "div" :attrs [["class"
+; "a"]] :children [...]}, and a text node is a string with its character
+; references decoded. The attributes are pairs in the order written, so that
+; an element can be written out as it was; use `attr` to look one up. Comments, doctypes and processing instructions are
 ; dropped. The root is an element with the tag "#document".
 ;
 ; Conforming to the HTML or XML specifications is not a goal. Anything that
@@ -145,6 +146,18 @@
 
 ; Parsing
 
+; Returns the attributes captured by `start-tag` as pairs, with names folded.
+; When a name is given twice, the first is kept, as in HTML.
+(defn- attr-pairs [captured fold]
+  (var seen #{})
+  (var out [])
+  (each [k v] captured
+    (def name (fold k))
+    (unless (has-key? seen name)
+      (set seen (conj seen name))
+      (set out (conj out [name (decode (or v ""))]))))
+  out)
+
 (defn parse
   """
   Parses text as markup and returns the root of the tree. mode is :html or
@@ -161,7 +174,7 @@
   (def len (length text))
   (defn fold [name] (if html? (string/ascii-lower name) name))
   ; Each open element is ![tag attrs children], with the root at the bottom.
-  (def stack ![!["#document" {} ![]]])
+  (def stack ![!["#document" [] ![]]])
   (defn top [] (last stack))
   (defn add [node] (array/push! ((top) 2) node))
   ; Whitespace outside every element is dropped: in XML anywhere, such as the
@@ -237,8 +250,7 @@
 
         (if-let [[name attrs self-closing? end] (and c (peg/match start-tag text pos))]
           (let [tag (fold name)
-                attrs (reduce (fn [m [k v]] (assoc m (fold k) (decode (or v ""))))
-                              {} attrs)]
+                attrs (attr-pairs attrs fold)]
             (set pos end)
             (open tag attrs self-closing?)
             (when (and html? (not self-closing?) (has-key? raw-tags tag))
@@ -253,6 +265,12 @@
   {:tag tag :attrs attrs :children (vec children)})
 
 ; Reading the tree
+
+(defn attr
+  "Returns the value of the attribute name of el, or nil if it has none."
+  [el name]
+  (when-let [pair (find #(= name ($ 0)) (el :attrs))]
+    (pair 1)))
 
 (defn element?
   "Returns true if node is an element rather than text."
@@ -275,3 +293,69 @@
           (each c (n :children) (walk c))))
       (walk node)
       (string buf))))
+
+; Writing the tree
+
+(def- text-escapes {"&" "&amp;" "<" "&lt;" ">" "&gt;" "\r" "&#13;"})
+(def- attr-escapes {"&" "&amp;" "<" "&lt;" ">" "&gt;" "\"" "&quot;"
+                    "\n" "&#10;" "\r" "&#13;" "\t" "&#9;"})
+
+(defn- escaper [escapes]
+  (def peg (peg/compile
+             `(% (any (+ (/ (<- (set ~(string/join "" (keys escapes))))
+                            ~escapes)
+                         (<- 1))))))
+  (fn [s]
+    (if (peg/match `(to (set ~(string/join "" (keys escapes)))) s)
+      (first (peg/match peg s))
+      s)))
+
+(def- escape-text (escaper text-escapes))
+(def- escape-attr (escaper attr-escapes))
+
+(defn- write-node [buf node mode raw?]
+  (if (string? node)
+    (buffer/push! buf (if raw? node (escape-text node)))
+    (do
+      (def tag (node :tag))
+      (buffer/push! buf "<" tag)
+      (each [k v] (node :attrs)
+        (buffer/push! buf " " k "=\"" (escape-attr v) "\""))
+      (def children (node :children))
+      (cond
+        (and (= mode :html) (has-key? void-tags tag))
+        (buffer/push! buf ">")
+
+        (and (= mode :xml) (empty? children))
+        (buffer/push! buf "/>")
+
+        (do
+          (buffer/push! buf ">")
+          (def raw-children? (and (= mode :html) (has-key? #{"script" "style"} tag)))
+          (each c children (write-node buf c mode raw-children?))
+          (buffer/push! buf "</" tag ">"))))))
+
+(defn write
+  """
+  Returns node written out as markup in mode, :html or :xml, as Nokogiri's
+  `to_s` does. Text is escaped, except in a `script` or `style` element in
+  HTML. In XML an empty element is written as `<name/>`. CDATA is written
+  as escaped text.
+  """
+  [node mode]
+  (def buf !"")
+  (if (= "#document" (get node :tag))
+    (each c (node :children) (write-node buf c mode false))
+    (write-node buf node mode false))
+  (string buf))
+
+(defn write-children
+  """
+  Returns the children of node written out as markup in mode, as Nokogiri's
+  `inner_html` does.
+  """
+  [node mode]
+  (def buf !"")
+  (def raw? (and (= mode :html) (has-key? #{"script" "style"} (get node :tag))))
+  (each c (get node :children []) (write-node buf c mode raw?))
+  (string buf))

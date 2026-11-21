@@ -10,105 +10,105 @@
 (deftest parse-root
   (def root (markup/parse "<p>a</p>" :html))
   (is (= "#document" (root :tag)))
-  (is (== [(el "p" {} "a")] (root :children))))
+  (is (== [(el "p" [] "a")] (root :children))))
 
 (deftest parse-mode
   (is (thrown? (markup/parse "" :json))))
 
 (deftest parse-nesting
-  (is (== [(el "div" {"class" "a"} "x" (el "span" {} "y") "z")]
+  (is (== [(el "div" [["class" "a"]] "x" (el "span" [] "y") "z")]
           (html "<div class=\"a\">x<span>y</span>z</div>"))))
 
 (deftest parse-html-names
-  (is (== [(el "div" {"class" "A"} "x")] (html "<DIV Class=\"A\">x</Div>"))))
+  (is (== [(el "div" [["class" "A"]] "x")] (html "<DIV Class=\"A\">x</Div>"))))
 
 (deftest parse-xml-names
-  (is (== [(el "itunes:Image" {"HREF" "u"})] (xml "<itunes:Image HREF=\"u\"/>"))))
+  (is (== [(el "itunes:Image" [["HREF" "u"]])] (xml "<itunes:Image HREF=\"u\"/>"))))
 
 (deftest parse-attributes
-  (is (== [(el "a" {"href" "x>y" "title" "it's" "data-n" "5" "hidden" ""})]
+  (is (== [(el "a" [["href" "x>y"] ["title" "it's"] ["data-n" "5"] ["hidden" ""]])]
           (html "<a href=\"x>y\" title='it&#39;s' data-n=5 hidden></a>")))
-  (is (== [(el "a" {"href" "/p?a=1&b=2"} "t")]
+  (is (== [(el "a" [["href" "/p?a=1&b=2"]] "t")]
           (html "<a href=\"/p?a=1&amp;b=2\">t</a>"))))
 
 (deftest parse-void
-  (is (== [(el "p" {} "a" (el "br" {}) "b" (el "img" {"src" "i"}) "c")]
+  (is (== [(el "p" [] "a" (el "br" []) "b" (el "img" [["src" "i"]]) "c")]
           (html "<p>a<br>b<img src=i>c</p>")))
-  (is (== [(el "br" {}) "x"] (html "<br/>x")))
-  (is (== [(el "img" {"src" "i"}) "x"] (html "<img src=\"i\" />x"))))
+  (is (== [(el "br" []) "x"] (html "<br/>x")))
+  (is (== [(el "img" [["src" "i"]]) "x"] (html "<img src=\"i\" />x"))))
 
 (deftest parse-xml-self-closing
-  (is (== [(el "item" {} (el "enclosure" {"url" "u"}) (el "guid" {} "g"))]
+  (is (== [(el "item" [] (el "enclosure" [["url" "u"]]) (el "guid" [] "g"))]
           (xml "<item><enclosure url=\"u\"/><guid>g</guid></item>")))
   ; Without `/>`, an element in XML is open until its end tag.
-  (is (== [(el "a" {} (el "b" {} (el "c" {})))] (xml "<a><b><c></a>"))))
+  (is (== [(el "a" [] (el "b" [] (el "c" [])))] (xml "<a><b><c></a>"))))
 
 (deftest parse-implied-p
-  (is (== [(el "p" {} "a") (el "div" {} "b")] (html "<p>a<div>b</div>")))
-  (is (== [(el "p" {} "a") (el "p" {} "b")] (html "<p>a<p>b"))))
+  (is (== [(el "p" [] "a") (el "div" [] "b")] (html "<p>a<div>b</div>")))
+  (is (== [(el "p" [] "a") (el "p" [] "b")] (html "<p>a<p>b"))))
 
 (deftest parse-implied-li
-  (is (== [(el "ul" {} (el "li" {} "a") (el "li" {} "b"))]
+  (is (== [(el "ul" [] (el "li" [] "a") (el "li" [] "b"))]
           (html "<ul><li>a<li>b</ul>")))
   ; An `li` in a nested list does not close the outer one.
-  (is (== [(el "ul" {} (el "li" {} "a" (el "ul" {} (el "li" {} "b"))))]
+  (is (== [(el "ul" [] (el "li" [] "a" (el "ul" [] (el "li" [] "b"))))]
           (html "<ul><li>a<ul><li>b</ul></ul>")))
   ; Nor does one in a table cell.
-  (is (== [(el "ul" {} (el "li" {} (el "table" {} (el "tr" {} (el "td" {} (el "li" {} "b")))) "c"))]
+  (is (== [(el "ul" [] (el "li" [] (el "table" [] (el "tr" [] (el "td" [] (el "li" [] "b")))) "c"))]
           (html "<ul><li><table><tr><td><li>b</table>c</ul>"))))
 
 (deftest parse-implied-table
-  (is (== [(el "table" {} (el "tr" {} (el "td" {} "a") (el "td" {} "b"))
-                          (el "tr" {} (el "td" {} "c")))]
+  (is (== [(el "table" [] (el "tr" [] (el "td" [] "a") (el "td" [] "b"))
+                          (el "tr" [] (el "td" [] "c")))]
           (html "<table><tr><td>a<td>b<tr><td>c</table>"))))
 
 (deftest parse-implied-a
-  (is (== [(el "a" {} "x") (el "a" {} "y")] (html "<a>x<a>y</a>"))))
+  (is (== [(el "a" [] "x") (el "a" [] "y")] (html "<a>x<a>y</a>"))))
 
 (deftest parse-end-tags
   ; An end tag closes the elements opened after its element.
-  (is (== [(el "div" {} (el "span" {} "a")) "b"] (html "<div><span>a</div>b")))
+  (is (== [(el "div" [] (el "span" [] "a")) "b"] (html "<div><span>a</div>b")))
   ; An end tag with no open element is ignored.
-  (is (== [(el "div" {} "a")] (html "<div>a</span></div>")))
+  (is (== [(el "div" [] "a")] (html "<div>a</span></div>")))
   ; Elements left open at the end are closed.
-  (is (== [(el "div" {} (el "span" {} "a"))] (html "<div><span>a"))))
+  (is (== [(el "div" [] (el "span" [] "a"))] (html "<div><span>a"))))
 
 (deftest parse-raw-text
-  (is (== [(el "script" {} "if (a<b) x = \"</div>\";") (el "p" {} "y")]
+  (is (== [(el "script" [] "if (a<b) x = \"</div>\";") (el "p" [] "y")]
           (html "<script>if (a<b) x = \"</div>\";</SCRIPT><p>y")))
-  (is (== [(el "style" {} "a > b {}")] (html "<style>a > b {}</style>")))
+  (is (== [(el "style" [] "a > b {}")] (html "<style>a > b {}</style>")))
   ; The text of a title is decoded; that of a script is not.
-  (is (== [(el "title" {} "A & B")] (html "<title>A &amp; B</title>")))
-  (is (== [(el "script" {} "&amp;")] (html "<script>&amp;</script>"))))
+  (is (== [(el "title" [] "A & B")] (html "<title>A &amp; B</title>")))
+  (is (== [(el "script" [] "&amp;")] (html "<script>&amp;</script>"))))
 
 (deftest parse-raw-text-in-xml
-  (is (== [(el "script" {} (el "b" {} "x"))] (xml "<script><b>x</b></script>"))))
+  (is (== [(el "script" [] (el "b" [] "x"))] (xml "<script><b>x</b></script>"))))
 
 (deftest parse-dropped
-  (is (== [(el "p" {} "a" "b")]
+  (is (== [(el "p" [] "a" "b")]
           (html "<!DOCTYPE html><!-- c --><p>a<!-- <p>no</p> -->b</p>")))
-  (is (== [(el "rss" {})] (xml "<?xml version=\"1.0\"?><rss/>"))))
+  (is (== [(el "rss" [])] (xml "<?xml version=\"1.0\"?><rss/>"))))
 
 (deftest parse-cdata
   ; The contents of CDATA are not decoded.
-  (is (== [(el "d" {} "<p>a &amp; b</p>")] (xml "<d><![CDATA[<p>a &amp; b</p>]]></d>"))))
+  (is (== [(el "d" [] "<p>a &amp; b</p>")] (xml "<d><![CDATA[<p>a &amp; b</p>]]></d>"))))
 
 (deftest parse-outer-whitespace
-  (is (== [(el "rss" {})] (xml "<?xml version=\"1.0\"?>\n<rss/>\n")))
+  (is (== [(el "rss" [])] (xml "<?xml version=\"1.0\"?>\n<rss/>\n")))
   ; In HTML, whitespace is dropped only before the first element.
-  (is (== [(el "p" {} "a") "\n" (el "p" {} "b")]
+  (is (== [(el "p" [] "a") "\n" (el "p" [] "b")]
           (html "<!DOCTYPE html>\n<p>a</p>\n<p>b</p>"))))
 
 (deftest parse-xml-line-breaks
-  (is (== [(el "d" {} "a\nb\nc")] (xml "<d>a\r\nb\rc</d>")))
-  (is (== [(el "d" {} "a\r\nb")] (html "<d>a\r\nb</d>"))))
+  (is (== [(el "d" [] "a\nb\nc")] (xml "<d>a\r\nb\rc</d>")))
+  (is (== [(el "d" [] "a\r\nb")] (html "<d>a\r\nb</d>"))))
 
 (deftest parse-stray-lt
-  (is (== [(el "p" {} "a " "<" " b " "<" "3")] (html "<p>a < b <3</p>"))))
+  (is (== [(el "p" [] "a " "<" " b " "<" "3")] (html "<p>a < b <3</p>"))))
 
 (deftest parse-unterminated
-  (is (== [(el "p" {} "a")] (html "<p>a<!-- never closed")))
-  (is (== [(el "a" {"href" "x"})] (html "<a href=x"))))
+  (is (== [(el "p" [] "a")] (html "<p>a<!-- never closed")))
+  (is (== [(el "a" [["href" "x"]])] (html "<a href=x"))))
 
 (deftest decode-references
   (is (= "a & b" (markup/decode "a &amp; b")))
@@ -128,6 +128,29 @@
   (def root (markup/parse "<div>a<p>b <i>c</i></p>d</div>" :html))
   (is (= "ab cd" (markup/text root)))
   (is (= "s" (markup/text "s"))))
+
+(deftest attributes-in-order
+  (def [a] (html "<a href=\"u\" ID=x href=\"v\" rel=me>t</a>"))
+  (is (== [["href" "u"] ["id" "x"] ["rel" "me"]] (a :attrs)))
+  (is (= "u" (markup/attr a "href")))
+  (is (= nil (markup/attr a "title"))))
+
+(deftest write-html
+  (def root (markup/parse "<div a=\"x&quot;y\">1 &lt; 2 &amp; <b>3</b><br><script>a<b</script></div>" :html))
+  (is (= "<div a=\"x&quot;y\">1 &lt; 2 &amp; <b>3</b><br><script>a<b</script></div>"
+         (markup/write root :html)))
+  (is (= "1 &lt; 2 &amp; <b>3</b><br><script>a<b</script>"
+         (markup/write-children ((root :children) 0) :html)))
+  (is (= "<p></p>" (markup/write (markup/parse "<p></p>" :html) :html))))
+
+(deftest write-xml
+  (def root (markup/parse "<item><enclosure url=\"u?a=1&amp;b\" length=\"5\" type=\"audio/mpeg\"/><t>a\nb</t></item>" :xml))
+  (def [item] (root :children))
+  (is (= "<enclosure url=\"u?a=1&amp;b\" length=\"5\" type=\"audio/mpeg\"/>"
+         (markup/write ((item :children) 0) :xml)))
+  (is (= "<t>a\nb</t>" (markup/write ((item :children) 1) :xml)))
+  ; CDATA is written as escaped text.
+  (is (= "<d>&lt;p&gt;</d>" (markup/write (markup/parse "<d><![CDATA[<p>]]></d>" :xml) :xml))))
 
 (deftest element-or-text
   (def [div] (html "<div>a</div>"))

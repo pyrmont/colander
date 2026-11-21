@@ -1,0 +1,114 @@
+(import ../deps/gum/test :prefix "")
+(import ../lib/template)
+
+(def- info [[:id "https://example.org/" :text]
+            [:title "A feed" :text]
+            [:updated "1970-01-01T00:00:00+09:00" :text]])
+
+(defn- post [n] [[:id (string "https://example.org/" n) :text]
+                 [:title "A post" :text]
+                 [:updated "1970-01-01T00:00:00+09:00" :text]])
+
+; Feedstock's test/data/feed1.xml.
+(deftest atom-feed
+  (is (== """
+          <?xml version="1.0" encoding="utf-8"?>
+          <feed xmlns="http://www.w3.org/2005/Atom">
+            <id>https://example.org/</id>
+            <title>A feed</title>
+            <updated>1970-01-01T00:00:00+09:00</updated>
+            <entry>
+              <id>https://example.org/1</id>
+              <title>A post</title>
+              <updated>1970-01-01T00:00:00+09:00</updated>
+            </entry>
+            <entry>
+              <id>https://example.org/2</id>
+              <title>A post</title>
+              <updated>1970-01-01T00:00:00+09:00</updated>
+            </entry>
+          </feed>
+
+          """
+          (template/atom {:info info :entries [(post 1) (post 2)]}))))
+
+; Feedstock's test/data/feed2.xml, with `type="html"`, which Atom needs for
+; the reader to read the contents as HTML.
+(deftest atom-cdata
+  (is (== """
+          <?xml version="1.0" encoding="utf-8"?>
+          <feed xmlns="http://www.w3.org/2005/Atom">
+            <id>https://example.org/</id>
+            <title>A feed</title>
+            <updated>1970-01-01T00:00:00+09:00</updated>
+            <entry>
+              <id>https://example.org/1</id>
+              <title>A post</title>
+              <updated>1970-01-01T00:00:00+09:00</updated>
+              <content type="html"><![CDATA[Some <em>content</em>!]]></content>
+            </entry>
+          </feed>
+
+          """
+          (template/atom {:info info
+                          :entries [[|(post 1) [:content "Some <em>content</em>!" :cdata]]]}))))
+
+(deftest atom-special
+  (is (== """
+          <?xml version="1.0" encoding="utf-8"?>
+          <feed xmlns="http://www.w3.org/2005/Atom">
+            <author><name>A &amp; B</name></author>
+            <link href="https://example.org/?a=1&amp;b=2" rel="alternate" />
+            <title>Tom&#39;s &lt;b&gt;</title>
+            <id><![CDATA[x]]></id>
+          </feed>
+
+          """
+          (template/atom {:info [[:author "A & B" :text]
+                                 [:link "https://example.org/?a=1&b=2" :text]
+                                 [:title "Tom's <b>" :text]
+                                 [:id "x" :cdata]]
+                          :entries []}))))
+
+(deftest podcast-feed
+  (is (== """
+          <?xml version="1.0" encoding="UTF-8"?>
+          <rss version="2.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+            <channel>
+              <title>A &amp; B</title>
+              <itunes:author>Radio</itunes:author>
+              <itunes:category text="News &amp; Politics"/>
+              <itunes:image href="https://example.org/i.jpg?w=1&amp;h=1"/>
+              <item>
+                <title>Episode</title>
+                <description><![CDATA[<p>Notes</p>]]></description>
+                <enclosure url="https://example.org/1.mp3" length="1" type="audio/mpeg"/>
+                <guid isPermaLink="false">abc</guid>
+                <itunes:duration>0:32:00</itunes:duration>
+              </item>
+            </channel>
+          </rss>
+
+          """
+          (template/podcast
+            {:info [[:title "A & B" :text]
+                    [:itunes:author "Radio" :text]
+                    [:itunes:category "News & Politics" :text]
+                    [:itunes:image "https://example.org/i.jpg?w=1&h=1" :text]]
+             :entries [[[:title "Episode" :text]
+                        [:description "<p>Notes</p>" :cdata]
+                        [:enclosure "<enclosure url=\"https://example.org/1.mp3\" length=\"1\" type=\"audio/mpeg\"/>" :markup]
+                        [:guid "abc" :text]
+                        [:itunes:duration "0:32:00" :text]]]}))))
+
+(deftest cdata-split
+  (is (= "<![CDATA[a]]]]><![CDATA[>b]]>" (template/cdata "a]]>b"))))
+
+(deftest render-templates
+  (def data {:info [] :entries []})
+  (is (= (template/atom data) (template/render :atom data)))
+  (is (= "x" (template/render (fn [d] "x") data)))
+  (is (thrown? (template/render :rss data)))
+  (is (thrown? (template/render (fn [d] 1) data))))
+
+(run-tests!)

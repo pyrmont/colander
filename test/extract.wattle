@@ -1,0 +1,174 @@
+(import ../deps/gum/test :prefix "")
+(import ../lib/date)
+(import ../lib/extract :prefix "")
+(import ../lib/markup)
+
+; A date without an offset is read in the local time zone, as in
+; Feedstock's tests.
+(def- epoch (string "1970-01-01T00:00:00" (date/format-offset (date/local-offset (os/mktime {:year 1970} true)))))
+
+(defn- html [text] (markup/parse text :html))
+
+; Returns the entries of feed for root as vectors of [name value] pairs.
+(defn- entry-pairs [feed root & opts]
+  (map (fn [e] (vec (map (fn [[k v _]] [k v]) e)))
+       ((data feed root |opts) :entries)))
+
+(def- unwrapped-page
+  (html """
+        <html><body>
+        <h2>January 1970</h2>
+        <div><h1>Title 1</h1>
+        <date>1/1/1970</date>
+        <p>Summary 1</p></div>
+        <div><h1>Title 2</h1>
+        <date>1/1/1970</date>
+        <p>Summary 2</p></div>
+        </body></html>
+        """))
+
+(deftest entries-unwrapped
+  (is (== [[[:title "Title 1"] [:updated epoch] [:summary "Summary 1"]]
+           [[:title "Title 2"] [:updated epoch] [:summary "Summary 2"]]]
+          (entry-pairs {:entry [[:title (extract "h1")]
+                                [:updated (extract "date" :type :datetime)]
+                                [:summary (extract "p")]]}
+                       unwrapped-page)))
+  (is (== [[[:content "<h1>Title 1</h1>\n<date>1/1/1970</date>\n<p>Summary 1</p>"]]
+           [[:content "<h1>Title 2</h1>\n<date>1/1/1970</date>\n<p>Summary 2</p>"]]]
+          (entry-pairs {:entry [[:content (extract "div" :content :inner-html :type :cdata)]]}
+                       unwrapped-page)))
+  (is (== [[[:title "Title 1"] [:updated epoch]]
+           [[:title "Title 2"] [:updated epoch]]]
+          (entry-pairs {:entry [[:title (extract "h1")]
+                                [:updated (extract "h2" :absolute true :type :datetime :prefix "1 ")]]}
+                       unwrapped-page))))
+
+(def- wrapped-page
+  (html """
+        <html><body>
+        <h2>January 1970</h2>
+        <div><h2>Title 1</h2>
+        <date>1/1/1970</date>
+        <p>Summary 1</p></div>
+        <div><h2>Title 2</h2>
+        <date>1/1/1970</date>
+        <p>Summary 2</p></div>
+        </body></html>
+        """))
+
+(deftest entries-wrapped
+  (is (== [[[:title "Title 1"] [:updated epoch] [:summary "Summary 1"]]
+           [[:title "Title 2"] [:updated epoch] [:summary "Summary 2"]]]
+          (entry-pairs {:entries (extract "div")
+                        :entry [[:title (extract "h2")]
+                                [:updated (extract "date" :type :datetime)]
+                                [:summary (extract "p")]]}
+                       wrapped-page)))
+  (is (== [[[:title "Title 1"] [:updated epoch]]
+           [[:title "Title 2"] [:updated epoch]]]
+          (entry-pairs {:entries (extract "div")
+                        :entry [[:title (extract "h2")]
+                                [:updated (extract "h2" :absolute true :type :datetime :prefix "1 ")]]}
+                       wrapped-page))))
+
+(deftest entries-own-element
+  ; An empty selector is the entry's element itself.
+  (is (== [[[:id "/a"] [:title "A"]] [[:id "/b"] [:title "B"]]]
+          (entry-pairs {:entries (extract "a")
+                        :entry [[:id (extract "" :attr "href")] [:title (extract "")]]}
+                       (html "<a href=/a>A</a><a href=/b>B</a>")))))
+
+(deftest info-values
+  (def page (html "<html><body><h1>A title</h1><h2>A summary</h2></body></html>"))
+  (is (== [[:title "A title" :text] [:summary "A summary" :text] [:id "x" :text]]
+          ((data {:info [[:title (extract "h1")] [:summary (extract "h2")] [:id "x"]]}
+                 page) :info))))
+
+(def- content-page
+  (html """
+        <html><body>
+        <a href="https://example.org/">A link</a>
+        <div><h1>A heading</h1></div>
+        <p>  Some text.
+        </p>
+        </body></html>
+        """))
+
+(defn- v [rule] (value rule content-page {:root content-page :mode :html :headers {}}))
+
+(deftest value-content
+  (is (= "https://example.org/" (v (extract "a" :attr "href"))))
+  (is (= "" (v (extract "a" :attr "title"))))
+  (is (= "<h1>A heading</h1>" (v (extract "div" :content :inner-html))))
+  (is (= "<div><h1>A heading</h1></div>" (v (extract "div" :content :html))))
+  (is (= "Some text." (v (extract "p")))))
+
+(deftest value-no-match
+  ; Nothing is added to a value when nothing matches.
+  (is (= "" (v (extract "table" :prefix "x" :type :datetime)))))
+
+(deftest value-wrap
+  (is (= "Some text." (v (extract "p"))))
+  (is (= "Text: Some text." (v (extract "p" :prefix "Text: "))))
+  (is (= "Some text.!" (v (extract "p" :suffix "!"))))
+  (is (= "'Some text.'?" (v (extract "p" :prefix "'" :suffix "'?")))))
+
+(deftest value-process
+  ; The value is processed before it is wrapped.
+  (def rule (extract "p" :process (fn [s r] (string/ascii-upper s)) :prefix "> "))
+  (is (= "> SOME TEXT." (v rule))))
+
+(deftest value-datetime
+  (is (= "" (v (extract "a" :type :datetime))))
+  (is (= epoch (value (extract "h2" :type :datetime)
+                      (html "<h2>1 January 1970</h2>")
+                      {:mode :html}))))
+
+(deftest value-header
+  (def ctx {:headers {"last-modified" "Tue, 11 Mar 2025 23:16:16 GMT"}})
+  (is (= "2025-03-11T23:16:16+00:00"
+         (value (header "Last-Modified" :type :datetime) nil ctx)))
+  (is (= "" (value (header "ETag") nil ctx))))
+
+(deftest modes
+  (is (= :text (mode-of "x")))
+  (is (= :text (mode-of (extract "p" :content :inner-html))))
+  (is (= :cdata (mode-of (extract "p" :content :inner-html :type :cdata))))
+  (is (= :markup (mode-of (extract "enclosure" :content :xml)))))
+
+(deftest keep-and-transform
+  (def page (markup/parse
+              """
+              <rss><item><title>A || Show</title><image href="yes"/></item>
+              <item><title>B || Show</title><image href="no"/></item></rss>
+              """
+              :xml))
+  (def feed {:entries (extract "item")
+             :entry [[:title (extract "title")] [:image (extract "image" :attr "href")]]
+             ; :keep? sees each entry before :transform.
+             :keep? (fn [e] (= "yes" (e :image)))
+             :transform (fn [e] (-> e
+                                    (assoc :title (string/replace-all " || Show" "" (e :title)))
+                                    (assoc :added "z")
+                                    (dissoc :image)))})
+  (is (== [[[:title "A" :text] [:added "z" :text]]] ((data feed page :mode :xml) :entries))))
+
+(deftest checks
+  (is (thrown? (extract 1)))
+  (is (thrown? (extract "p" :content :json)))
+  (is (thrown? (extract "p" :type :date)))
+  (is (thrown? (extract "p" :attr "href" :content :text)))
+  (is (thrown? (extract "p:hover")))
+  (is (thrown? (check {:info {:title "x"}})))
+  (is (thrown? (check {:info [["title" "x"]]})))
+  (is (thrown? (check {:info [[:title 1]]})))
+  (is (thrown? (check {:entries "item"})))
+  (is (thrown? (check {:keep? true})))
+  (is (thrown? (data {:entries (extract "p") :entry [[:t (extract "")]]
+                      :transform (fn [e] [e])}
+                     (html "<p>x</p>"))))
+  (is (thrown? (data {:entries (extract "p") :entry [[:t (extract "" :process (fn [s r] 1))]]}
+                     (html "<p>x</p>")))))
+
+(run-tests!)

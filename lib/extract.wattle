@@ -1,0 +1,233 @@
+; Rules for extracting a feed's information and entries from a parsed page,
+; after Feedstock's `Extract`.
+;
+; A feed is a map:
+;
+; - :info, a vector of [name value] pairs for the feed itself;
+; - :entry, a vector of [name value] pairs for each entry;
+; - :entries, optionally, an `extract` rule that selects each entry's
+;   element. The :entry rules then select within it;
+; - :keep?, optionally, a function of an entry that returns true to keep it;
+; - :transform, optionally, a function from an entry to the entry to write.
+;
+; A name is a keyword, such as :title or :itunes:image. A value is a string,
+; an `extract` rule or a `header` rule. The pairs are vectors, not maps,
+; because the feed is written in their order.
+;
+; `entries` gives each entry to :keep? and :transform as a map of names to
+; strings. A transform may change, add or remove values: those it adds are
+; written after the rest, in order of name.
+
+(import ./date)
+(import ./markup)
+(import ./select)
+
+(def- content-kinds #{:text :inner-html :html :xml})
+(def- types #{:datetime :cdata})
+
+(defn- check-common [rule]
+  (def {:keys [process prefix suffix type]} rule)
+  (assertf (or (nil? process) (function? process))
+           ":process must be a function: %p" process)
+  (assertf (or (nil? prefix) (string? prefix)) ":prefix must be a string: %p" prefix)
+  (assertf (or (nil? suffix) (string? suffix)) ":suffix must be a string: %p" suffix)
+  (assertf (or (nil? type) (has-key? types type))
+           ":type must be :datetime or :cdata: %p" type)
+  rule)
+
+(defn extract
+  """
+  Returns a rule that extracts a value from the first element that selector
+  matches. The selector is searched for in the entry's element, or in the
+  whole page with :absolute or in :info. An empty selector is the entry's
+  element itself. Options:
+
+  - :content, what to take from the element: :text (the default, its text
+    with surrounding whitespace removed), :inner-html (its contents as
+    markup), or :html or :xml (the element itself as markup)
+  - :attr, the name of an attribute to take instead
+  - :process, a function of the value and the rule, returning a string
+  - :prefix and :suffix, strings to add to the value
+  - :type, :datetime (read the value as a date, write it as RFC 3339, or as
+    an empty string if it is not a date) or :cdata (write the value in a
+    CDATA section)
+
+  A value is the empty string if nothing matches. Otherwise the steps are
+  applied in that order: content, process, prefix and suffix, type.
+  """
+  [selector & {:keys [absolute content attr process prefix suffix type]}]
+  (assertf (string? selector) "selector must be a string: %p" selector)
+  (assertf (or (nil? content) (has-key? content-kinds content))
+           ":content must be :text, :inner-html, :html or :xml: %p" content)
+  (assertf (or (nil? attr) (string? attr)) ":attr must be a string: %p" attr)
+  (assertf (not (and attr content)) ":attr and :content cannot be used together")
+  (check-common
+    {:rule :extract
+     :selector selector
+     :compiled (unless (empty? (string/trim selector)) (select/compile selector))
+     :absolute (truthy? absolute)
+     :content (or content :text)
+     :attr attr
+     :process process :prefix prefix :suffix suffix :type type}))
+
+(defn header
+  """
+  Returns a rule that takes the value of the response header name (in any
+  case), or the empty string if there is none. It takes the options of
+  `extract` other than :content, :attr and :absolute.
+  """
+  [name & {:keys [process prefix suffix type]}]
+  (assertf (string? name) "header name must be a string: %p" name)
+  (check-common
+    {:rule :header :name (string/ascii-lower name)
+     :process process :prefix prefix :suffix suffix :type type}))
+
+(defn- rule? [v] (and (map? v) (has-key? #{:extract :header} (get v :rule))))
+
+(defn- check-fields [key fields]
+  (assertf (or (vector? fields) (array? fields))
+           "%s must be a vector of [name value] pairs" key)
+  (each pair fields
+    (assertf (and (or (vector? pair) (array? pair)) (= 2 (length pair))
+                  (keyword? (pair 0))
+                  (or (string? (pair 1)) (rule? (pair 1))))
+             "each pair in %s must be a keyword and a string or rule: %p" key pair)))
+
+(defn check
+  "Returns feed if it is a valid feed map, and raises an error otherwise."
+  [feed]
+  (assertf (map? feed) "a feed must be a map: %p" feed)
+  (check-fields :info (get feed :info []))
+  (check-fields :entry (get feed :entry []))
+  (when-let [e (get feed :entries)]
+    (assertf (and (rule? e) (= :extract (e :rule)))
+             ":entries must be an extract rule: %p" e))
+  (each k [:keep? :transform]
+    (when-let [f (get feed k)]
+      (assertf (function? f) "%s must be a function: %p" k f)))
+  feed)
+
+(defn- finish [value rule]
+  (def processed (if-let [f (rule :process)] (f value rule) value))
+  (assertf (string? processed) ":process must return a string: %p" processed)
+  (def wrapped (string (or (rule :prefix) "") processed (or (rule :suffix) "")))
+  (if (= :datetime (rule :type))
+    (if-let [d (date/parse wrapped)] (date/rfc3339 d) "")
+    wrapped))
+
+(defn- content-of [node rule mode]
+  (if-let [a (rule :attr)]
+    (or (markup/attr node a) "")
+    (case (rule :content)
+      :text (string/trim (markup/text node))
+      :inner-html (markup/write-children node mode)
+      (markup/write node mode))))
+
+(defn- value-of-match [v target ctx]
+  (if target (finish (content-of target v (ctx :mode)) v) ""))
+
+(defn value
+  """
+  Returns the value of v, a string or rule, for the element node. ctx is a
+  map with :root (the parsed page), :mode (:html or :xml) and :headers (a
+  map of lowercase header names to values).
+  """
+  [v node ctx]
+  (cond
+    (string? v) v
+
+    (= :header (v :rule))
+    (if-let [h (get-in ctx [:headers (v :name)])] (finish h v) "")
+
+    (let [target (cond
+                   (nil? (v :compiled)) node
+                   (v :absolute) (select/select-1 (ctx :root) (v :compiled))
+                   (select/select-1 node (v :compiled)))]
+      (value-of-match v target ctx))))
+
+(defn mode-of
+  """
+  Returns how the value of v is written: :cdata, :markup (for :content :html
+  or :xml) or :text.
+  """
+  [v]
+  (cond
+    (string? v) :text
+    (= :cdata (v :type)) :cdata
+    (has-key? #{:html :xml} (get v :content)) :markup
+    :text))
+
+(defn info
+  "Returns the feed's :info as a map, read from the whole page."
+  [feed ctx]
+  (reduce (fn [m [k v]] (assoc m k (value v (ctx :root) ctx))) {} (get feed :info [])))
+
+(defn- unwrapped [feed ctx]
+  ; Without :entries, each rule that is not absolute selects every match
+  ; in the page, and the nth match goes to the nth entry, as in Feedstock.
+  (def per-entry ![])
+  (var shared {})
+  (each [k v] (get feed :entry [])
+    (if (or (string? v) (= :header (v :rule)) (v :absolute) (nil? (v :compiled)))
+      (set shared (assoc shared k (value v (ctx :root) ctx)))
+      (do
+        (def matches (select/select (ctx :root) (v :compiled)))
+        (var i 0)
+        (each m matches
+          (when (= (length per-entry) i) (array/push! per-entry {}))
+          (put! per-entry i (assoc (per-entry i) k (value-of-match v m ctx)))
+          (++ i)))))
+  (map (fn [e] (reduce (fn [acc [k v]] (assoc acc k v)) e (pairs shared)))
+       per-entry))
+
+(defn entries
+  """
+  Returns the feed's entries as an array of maps, before :keep? and
+  :transform.
+  """
+  [feed ctx]
+  (if-let [rule (feed :entries)]
+    (map (fn [parent]
+           (reduce (fn [m [k v]] (assoc m k (value v parent ctx))) {} (get feed :entry [])))
+         (if (rule :compiled)
+           (select/select (ctx :root) (rule :compiled))
+           []))
+    (unwrapped feed ctx)))
+
+; Returns the values of m as [name value mode] triples: first those named in
+; fields, in their order, then the rest, in order of name.
+(defn- ordered [m fields]
+  (def modes (reduce (fn [acc [k v]] (assoc acc k (mode-of v))) {} fields))
+  (var out [])
+  (var seen #{})
+  (each [k _] fields
+    (when (and (not (has-key? seen k)) (has-key? m k))
+      (set seen (conj seen k))
+      (set out (conj out [k (m k) (modes k)]))))
+  (each k (sort (filter #(not (has-key? seen $)) (keys m)))
+    (set out (conj out [k (m k) :text])))
+  out)
+
+(defn data
+  """
+  Returns the information and entries of feed for the parsed page root, as
+  a map with :info, a vector of [name value mode] triples, and :entries, a
+  vector of such vectors. Entries that :keep? rejects are left out, and
+  :transform is applied to the rest. Options: :mode, :html or :xml (the
+  default is :html), and :headers, the response headers.
+  """
+  [feed root & {:keys [mode headers] :or {mode :html headers {}}}]
+  (check feed)
+  (def ctx {:root root :mode mode :headers headers})
+  (def keep? (get feed :keep? (fn [_] true)))
+  (def transform (get feed :transform identity))
+  (def kept (filter keep? (entries feed ctx)))
+  {:info (ordered (info feed ctx) (get feed :info []))
+   :entries (vec (map (fn [e]
+                        (def t (transform e))
+                        (assertf (map? t) ":transform must return a map: %p" t)
+                        (each [k v] (pairs t)
+                          (assertf (and (keyword? k) (string? v))
+                                   ":transform must return keywords and strings: %p %p" k v))
+                        (ordered t (get feed :entry [])))
+                      kept))})

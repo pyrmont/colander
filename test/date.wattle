@@ -1,0 +1,53 @@
+(import ../deps/gum/test :prefix "")
+(import ../lib/date)
+
+; Returns s parsed and written as RFC 3339, or nil.
+(defn- iso [s] (when-let [d (date/parse s)] (date/rfc3339 d)))
+
+; The local offset at the local time written in fields.
+(defn- local [fields]
+  (date/format-offset (date/local-offset (os/mktime fields true))))
+
+(deftest parse-iso
+  (is (= "2026-11-20T19:59:45+00:00" (iso "2026-11-20T19:59:45+00:00")))
+  (is (= "2026-11-20T19:59:45+00:00" (iso "2026-11-20 19:59:45.123Z")))
+  (is (= "2026-11-20T19:59:45-05:30" (iso "2026-11-20T19:59:45-0530")))
+  (is (= (string "2026-11-20T00:00:00" (local {:year 2026 :month 10 :month-day 19}))
+         (iso "2026-11-20"))))
+
+(deftest parse-rfc822
+  (is (= "2026-11-20T19:59:45+00:00" (iso "Fri, 20 Nov 2026 19:59:45 +0000")))
+  (is (= "2025-03-11T23:16:16+00:00" (iso "Tue, 11 Mar 2025 23:16:16 GMT")))
+  (is (= "2026-11-21T07:00:00+11:00" (iso "Sat, 21 Nov 2026 07:00:00 +1100")))
+  (is (= "2024-01-01T10:00:00-05:00" (iso "Mon, 1 Jan 2024 10:00:00 EST")))
+  (is (= "2026-11-20T19:59:00+00:00" (iso "20 Nov 2026 19:59 UT"))))
+
+(deftest parse-names
+  (def nov23 (string "2026-11-23T00:00:00" (local {:year 2026 :month 10 :month-day 22})))
+  (is (= nov23 (iso "November 23, 2026")))
+  (is (= nov23 (iso "Nov 23 2026")))
+  (is (= nov23 (iso "november 23rd, 2026")))
+  (is (= nov23 (iso "23 November 2026")))
+  (is (= nov23 (iso "  23 Nov. 2026 ")))
+  (is (= (string "2016-09-01T00:00:00" (local {:year 2016 :month 8}))
+         (iso "1 Sept 2016"))))
+
+(deftest parse-slashes
+  ; The month comes first, as Timeliness reads it.
+  (is (= (string "1970-02-01T00:00:00" (local {:year 1970 :month 1}))
+         (iso "2/1/1970"))))
+
+(deftest parse-invalid
+  (is (= nil (iso "A title")))
+  (is (= nil (iso "")))
+  (is (= nil (iso "31 April 2026")))
+  (is (= nil (iso "2026-13-01")))
+  (is (= nil (iso "2026-11-20T25:00:00Z")))
+  (is (= nil (iso "Smarch 1, 2026"))))
+
+(deftest offsets
+  (is (= "+09:00" (date/format-offset 32400)))
+  (is (= "-05:30" (date/format-offset -19800)))
+  (is (= "+00:00" (date/format-offset 0))))
+
+(run-tests!)
