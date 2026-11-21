@@ -1,0 +1,139 @@
+; A subset of CSS selectors, for the trees that `markup/parse` returns.
+;
+; Supported: type selectors (`div`, `*`, and `ns|type`, which matches the
+; tag `ns:type`), `.class`, `#id`, `[attr]`, `[attr=v]`, `[attr~=v]`,
+; `[attr^=v]`, `[attr$=v]`, `[attr*=v]`, the descendant and child (`>`)
+; combinators, and lists of selectors separated by `,`. Anything else is an
+; error when the selector is compiled. Names are compared as written, and
+; `markup/parse` lowercases HTML names, so write HTML selectors in lower
+; case.
+;
+; A compiled selector is a vector of alternatives. Each alternative is a
+; vector of steps, [combinator compound], from left to right. The
+; combinator is :desc or :child, and is ignored on the first step. A
+; compound is a map with any of :tag, :id, :classes and :attrs.
+
+(def- grammar
+  (peg/compile
+    `{:ws (any (set " \t\r\n"))
+      :name (<- (some (if-not (set " \t\r\n.#[]>,:|()~+*=^$\"'") 1)))
+      :value (+ (* "\"" (<- (any (if-not "\"" 1))) "\"")
+                (* "'" (<- (any (if-not "'" 1))) "'")
+                (<- (some (if-not (set " \t\r\n]") 1))))
+      :op (<- (+ "=" "~=" "^=" "$=" "*="))
+      :type (+ (* "*" (constant :any))
+               (/ (* :name "|" :name) ~(fn [ns n] (string ns ":" n)))
+               :name)
+      :simple (+ (group (* "." (constant :class) :name))
+                 (group (* "#" (constant :id) :name))
+                 (group (* "[" :ws (constant :attr) :name :ws
+                           (? (* :op :ws :value :ws)) "]")))
+      :compound (group (* (+ (group (* (constant :type) :type)) (constant nil))
+                          (some :simple)))
+      :compound* (+ :compound (group (group (* (constant :type) :type))))
+      :comb (+ (* :ws ">" :ws (constant :child))
+               (* (some (set " \t\r\n")) (constant :desc)))
+      :alt (group (* :ws (group (* (constant :desc) :compound*))
+                     (any (group (* :comb :compound*))) :ws))
+      :main (* :alt (any (* "," :alt)) -1)}))
+
+(defn- compile-compound [parts]
+  (reduce (fn [c part]
+            (if (nil? part)
+              c
+              (case (part 0)
+                :type (if (= (part 1) :any) c (assoc c :tag (part 1)))
+                :class (assoc c :classes (conj (get c :classes []) (part 1)))
+                :id (assoc c :id (part 1))
+                :attr (assoc c :attrs (conj (get c :attrs [])
+                                            [(part 1) (get part 2) (get part 3)])))))
+          {} parts))
+
+(defn compile
+  "Compiles the selector text. Raises an error if it is not supported."
+  [text]
+  (def alts (or (peg/match grammar text)
+                (errorf "unsupported selector: %q" text)))
+  (vec (map (fn [alt]
+              (vec (map (fn [[comb parts]] [comb (compile-compound parts)]) alt)))
+            alts)))
+
+(defn- some-of [pred xs]
+  (var ok false)
+  (each x xs (when (and (not ok) (pred x)) (set ok true)))
+  ok)
+
+(defn- every-of [pred xs]
+  (var ok true)
+  (each x xs (when (and ok (not (pred x))) (set ok false)))
+  ok)
+
+(def- word-peg (peg/compile `(any (+ (some (set " \t\r\n\f")) (<- (some (if-not (set " \t\r\n\f") 1)))))))
+
+(defn- has-word? [value word]
+  (and value (some-of #(= $ word) (peg/match word-peg value))))
+
+(defn- attr-match? [attrs [name op value]]
+  (def v (get attrs name))
+  (and v
+       (case op
+         nil true
+         "=" (= v value)
+         "~=" (has-word? v value)
+         "^=" (and (not (empty? value)) (string/has-prefix? value v))
+         "$=" (and (not (empty? value)) (string/has-suffix? value v))
+         "*=" (and (not (empty? value)) (not (nil? (string/find value v)))))))
+
+(defn- compound-match? [c el]
+  (def attrs (el :attrs))
+  (and (or (nil? (c :tag)) (= (c :tag) (el :tag)))
+       (or (nil? (c :id)) (= (c :id) (get attrs "id")))
+       (every-of #(has-word? (get attrs "class") $) (get c :classes []))
+       (every-of #(attr-match? attrs $) (get c :attrs []))))
+
+; Returns true if el, whose ancestors are the first plen elements of path,
+; matches the steps of an alternative up to step i.
+(defn- steps-match? [steps i el path plen]
+  (def [comb c] (steps i))
+  (and (compound-match? c el)
+       (or (= i 0)
+           (if (= comb :child)
+             (and (> plen 0)
+                  (steps-match? steps (dec i) (path (dec plen)) path (dec plen)))
+             (do
+               (var j (dec plen))
+               (var ok false)
+               (while (and (>= j 0) (not ok))
+                 (when (steps-match? steps (dec i) (path j) path j)
+                   (set ok true))
+                 (-- j))
+               ok)))))
+
+(defn- matches? [sel el path]
+  (def plen (length path))
+  (some-of #(steps-match? $ (dec (length $)) el path plen) sel))
+
+(defn select
+  """
+  Returns an array of the descendants of node that match sel, a compiled
+  selector, in document order. As in Nokogiri, every element that a
+  selector names must be a descendant of node. With :limit, stops after
+  that many matches.
+  """
+  [node sel & {:keys [limit]}]
+  (def out ![])
+  (def path ![])
+  (defn walk [n]
+    (each c (n :children)
+      (when (and (map? c) (or (nil? limit) (< (length out) limit)))
+        (when (matches? sel c path) (array/push! out c))
+        (array/push! path c)
+        (walk c)
+        (array/pop! path))))
+  (walk node)
+  out)
+
+(defn select-1
+  "Returns the first descendant of node that matches sel, or nil."
+  [node sel]
+  (first (select node sel :limit 1)))

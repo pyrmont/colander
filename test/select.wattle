@@ -1,0 +1,99 @@
+(import ../deps/gum/test :prefix "")
+(import ../lib/markup)
+(import ../lib/select)
+
+(def- page
+  (markup/parse
+    """
+    <div id="main" class="page wide">
+      <h1>Title</h1>
+      <ul class="posts">
+        <li class="post"><a href="/a">A</a> <span class="date">1</span></li>
+        <li class="post featured"><a href="/b" rel="me">B</a></li>
+        <li><div><a href="https://x.org/c">C</a></div></li>
+      </ul>
+      <p data-kind="BundleHeaderDekText-x1">Dek</p>
+    </div>
+    <a href="/d">D</a>
+    """
+    :html))
+
+; Returns the text of each match of selector in node.
+(defn- texts [node selector]
+  (vec (map markup/text (select/select node (select/compile selector)))))
+
+(deftest select-type
+  (is (== ["A" "B" "C" "D"] (texts page "a")))
+  (is (== ["Title"] (texts page "h1"))))
+
+(deftest select-universal
+  (is (== ["A" "B" "C"] (texts page "li > * > a, li > a"))))
+
+(deftest select-class
+  (is (== ["A 1" "B"] (texts page ".post")))
+  (is (== ["B"] (texts page "li.post.featured")))
+  (is (== [] (texts page ".pos"))))
+
+(deftest select-id
+  (is (== ["Title"] (texts page "#main h1")))
+  (is (== [] (texts page "#nope h1"))))
+
+(deftest select-attributes
+  (is (== ["B"] (texts page "a[rel]")))
+  (is (== ["B"] (texts page "a[href=\"/b\"]")))
+  (is (== ["B"] (texts page "a[rel=me]")))
+  (is (== ["C"] (texts page "a[href^=https]")))
+  (is (== ["C"] (texts page "a[href$='/c']")))
+  (is (== ["Dek"] (texts page "p[data-kind*=BundleHeaderDekText]")))
+  (is (== ["A 1" "B"] (texts page "li[class~=post]")))
+  ; An empty value matches nothing.
+  (is (== [] (texts page "a[href*='']"))))
+
+(deftest select-descendant
+  (is (== ["A" "B" "C"] (texts page "ul a")))
+  (is (== ["A" "B" "C"] (texts page "div ul li a"))))
+
+(deftest select-child
+  (is (== ["A" "B"] (texts page "li > a")))
+  (is (== ["A" "B"] (texts page "ul.posts > li > a")))
+  (is (== [] (texts page "ul > a"))))
+
+(deftest select-list
+  ; Matches come in document order, once each.
+  (is (== ["Title" "A" "B" "C" "Dek" "D"] (texts page "p, a[href^='/'], h1, li div a")))
+  (is (== ["A" "B" "C"] (texts page "ul a, li a"))))
+
+(deftest select-relative
+  ; Every element a selector names must be inside the node searched.
+  (def ul (select/select-1 page (select/compile "ul")))
+  (is (== ["A" "B" "C"] (texts ul "a")))
+  (is (== [] (texts ul "#main a")))
+  (is (== ["C"] (texts ul "div a")))
+  (is (== ["C"] (texts ul "li div a"))))
+
+(deftest select-limit
+  (is (== 2 (length (select/select page (select/compile "a") :limit 2))))
+  (is (= "A" (markup/text (select/select-1 page (select/compile "a")))))
+  (is (= nil (select/select-1 page (select/compile "table")))))
+
+(deftest select-namespaced
+  (def feed
+    (markup/parse
+      "<item><itunes:image href=\"u\"/><content:encoded>c</content:encoded></item>"
+      :xml))
+  (is (== ["c"] (texts feed "content|encoded")))
+  (is (= "u" (get ((select/select-1 feed (select/compile "item itunes|image")) :attrs) "href"))))
+
+(deftest select-whitespace
+  (is (== ["A" "B"] (texts page "  li>a ")))
+  (is (== ["A" "B"] (texts page "li\n  >  a"))))
+
+(deftest compile-unsupported
+  (is (thrown? (select/compile "li:first-child")))
+  (is (thrown? (select/compile "h1 + p")))
+  (is (thrown? (select/compile "h1 ~ p")))
+  (is (thrown? (select/compile "")))
+  (is (thrown? (select/compile "a,")))
+  (is (thrown? (select/compile "[href"))))
+
+(run-tests!)

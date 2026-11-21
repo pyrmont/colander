@@ -1,0 +1,277 @@
+; A lenient HTML and XML parser.
+;
+; `parse` returns a tree. An element is a map, {:tag "div" :attrs {"class"
+; "a"} :children [...]}, and a text node is a string with its character
+; references decoded. Comments, doctypes and processing instructions are
+; dropped. The root is an element with the tag "#document".
+;
+; Conforming to the HTML or XML specifications is not a goal. Anything that
+; looks like `<name ...>` is a tag, whatever the name. In HTML mode the
+; parser knows only what changes which elements contain which:
+;
+; - the contents of `script`, `style` and the like are text, not markup;
+; - void elements, such as `img`, have no contents;
+; - some start tags close an open element, as `<li>` closes an open `li`.
+;
+; It does not add the `html`, `head` or `body` elements that an HTML parser
+; would imply. In HTML mode tag and attribute names are lowercased; in XML
+; mode they are kept as written, with their prefixes (`itunes:image`).
+
+(import ./entities)
+
+(def- void-tags
+  #{"area" "base" "br" "col" "embed" "hr" "img" "input" "keygen" "link"
+    "meta" "param" "source" "track" "wbr"})
+
+(def- raw-tags
+  #{"script" "style" "textarea" "title" "xmp" "iframe" "noembed" "noframes"
+    "plaintext"})
+
+; Start tags that close an open `p`.
+(def- p-closers
+  #{"address" "article" "aside" "blockquote" "center" "details" "dialog"
+    "dir" "div" "dl" "fieldset" "figcaption" "figure" "footer" "form" "h1"
+    "h2" "h3" "h4" "h5" "h6" "header" "hgroup" "hr" "main" "menu" "nav" "ol"
+    "p" "pre" "section" "summary" "table" "ul" "li" "dd" "dt"})
+
+; Elements past which a search for an open `p`, `li` and the like does not
+; go, so that a list in a table cell does not close an item outside it.
+(def- scope-stops
+  #{"html" "table" "td" "th" "caption" "object" "template" "applet"
+    "marquee" "button"})
+
+(def- headings #{"h1" "h2" "h3" "h4" "h5" "h6"})
+
+(defn- scoped [stops] (reduce conj stops scope-stops))
+
+; For a start tag, the open elements it closes and the elements that stop
+; the search for them. The table elements are searched for past `td` and
+; `th`, since a new row or cell closes the cell before it.
+(def- implied
+  {"p" [#{"p"} (scoped #{})]
+   "li" [#{"li"} (scoped #{"ul" "ol"})]
+   "dt" [#{"dt" "dd"} (scoped #{"dl"})]
+   "dd" [#{"dt" "dd"} (scoped #{"dl"})]
+   "tr" [#{"tr"} #{"table" "tbody" "thead" "tfoot"}]
+   "td" [#{"td" "th"} #{"tr" "table"}]
+   "th" [#{"td" "th"} #{"tr" "table"}]
+   "tbody" [#{"tbody" "thead" "tfoot"} #{"table"}]
+   "thead" [#{"tbody" "thead" "tfoot"} #{"table"}]
+   "tfoot" [#{"tbody" "thead" "tfoot"} #{"table"}]
+   "option" [#{"option"} (scoped #{"select" "datalist" "optgroup"})]
+   "optgroup" [#{"optgroup" "option"} (scoped #{"select"})]
+   "a" [#{"a"} (scoped #{})]})
+
+; Matches a start tag at a position. A tag name begins with a letter, `_`,
+; `:` or a non-ASCII byte, so `<3` is text. Captures the name, the attributes (each
+; a name and maybe a value), whether the tag ends with `/>`, and the
+; position after it. A `/` between attributes is skipped.
+(def- start-tag
+  (peg/compile
+    `{:ws (set " \t\r\n\f")
+      :name (some (if-not (set " \t\r\n\f/<>=\"'") 1))
+      :tag-name (* (+ :a (set "_:") (range "\x80\xFF")) (any (if-not (set " \t\r\n\f/<>=\"'") 1)))
+      :value (+ (* "\"" (<- (any (if-not "\"" 1))) "\"")
+                (* "'" (<- (any (if-not "'" 1))) "'")
+                (<- (some (if-not (set " \t\r\n\f>") 1))))
+      :sep (any (+ :ws (* "/" (not (* (any :ws) ">")))))
+      :attr (* :sep (group (* (<- :name)
+                              (? (* (any :ws) "=" (any :ws) :value)))))
+      :main (* "<" (<- :tag-name) (group (any :attr)) :sep (any :ws)
+               (+ (* "/" (any :ws) ">" (constant true))
+                  (* ">" (constant false))
+                  (* -1 (constant false)))
+               ($))}))
+
+; Matches an end tag at a position. Captures the name and the position after
+; it.
+(def- end-tag
+  (peg/compile
+    `(* "</" (<- (any (if-not (set " \t\r\n\f/>") 1))) (thru ">") ($))))
+
+; Character references
+
+(defn utf8
+  "Returns the UTF-8 encoding of the code point cp."
+  [cp]
+  (cond
+    (< cp 0x80) (string/from-bytes cp)
+    (< cp 0x800) (string/from-bytes (bor 0xC0 (brshift cp 6))
+                                    (bor 0x80 (band cp 0x3F)))
+    (< cp 0x10000) (string/from-bytes (bor 0xE0 (brshift cp 12))
+                                      (bor 0x80 (band (brshift cp 6) 0x3F))
+                                      (bor 0x80 (band cp 0x3F)))
+    (string/from-bytes (bor 0xF0 (brshift cp 18))
+                       (bor 0x80 (band (brshift cp 12) 0x3F))
+                       (bor 0x80 (band (brshift cp 6) 0x3F))
+                       (bor 0x80 (band cp 0x3F)))))
+
+; A code point that a numeric reference cannot give is replaced with U+FFFD.
+(defn- code-point [digits base]
+  (def cp (scan-number digits base))
+  (if (or (nil? cp) (= cp 0) (> cp 0x10FFFF) (<= 0xD800 cp 0xDFFF))
+    0xFFFD
+    cp))
+
+; The PEG passes the captured name before the whole reference.
+(defn- reference [name whole]
+  (cond
+    (or (string/has-prefix? "#x" name) (string/has-prefix? "#X" name))
+    (utf8 (code-point (string/slice name 2) 16))
+
+    (string/has-prefix? "#" name)
+    (utf8 (code-point (string/slice name 1) 10))
+
+    (if-let [cp (get entities/table name)] (utf8 cp) whole)))
+
+(def- references
+  (peg/compile
+    `(% (any (+ (/ (<- (* "&" (<- (+ (* "#" (+ (* (set "xX") (some :h))
+                                                (some :d)))
+                                     (some (+ :w :d))))
+                          ";"))
+                   ~reference)
+                (<- 1))))))
+
+(defn decode
+  """
+  Returns text with its character references replaced. A reference must end
+  with `;`. A name that is not in `entities/table` is left as written.
+  """
+  [text]
+  (if (string/find "&" text)
+    (first (peg/match references text))
+    text))
+
+; Parsing
+
+(defn parse
+  """
+  Parses text as markup and returns the root of the tree. mode is :html or
+  :xml.
+  """
+  [text mode]
+  (assertf (has-key? #{:html :xml} mode) "mode must be :html or :xml: %p" mode)
+  (def html? (= mode :html))
+  ; XML reads each line break, `\r\n` or `\r`, as `\n`.
+  (def text (if (or html? (nil? (string/find "\r" text)))
+              text
+              (string/replace-all "\r" "\n" (string/replace-all "\r\n" "\n" text))))
+  (def lower (if html? (string/ascii-lower text) text))
+  (def len (length text))
+  (defn fold [name] (if html? (string/ascii-lower name) name))
+  ; Each open element is ![tag attrs children], with the root at the bottom.
+  (def stack ![!["#document" {} ![]]])
+  (defn top [] (last stack))
+  (defn add [node] (array/push! ((top) 2) node))
+  ; Whitespace outside every element is dropped: in XML anywhere, such as the
+  ; line break after `<?xml ...?>`, and in HTML before the first element. An
+  ; HTML parser would put whitespace after it in an implied `body`.
+  (var started? false)
+  (defn add-text [s]
+    (when (and (> (length s) 0)
+               (or (> (length stack) 1)
+                   (and html? started?)
+                   (not (empty? (string/trim s)))))
+      (add (decode s))))
+  (defn close-top []
+    (def [tag attrs children] (array/pop! stack))
+    (add {:tag tag :attrs attrs :children (vec children)}))
+  (defn close-to [i]
+    (while (> (length stack) i) (close-top)))
+  ; Returns the index in stack of the nearest open element in tags, or nil if
+  ; an element in stops comes first.
+  (defn find-open [tags stops]
+    (var i (dec (length stack)))
+    (var found nil)
+    (while (and (> i 0) (nil? found))
+      (def tag ((stack i) 0))
+      (cond
+        (has-key? tags tag) (set found i)
+        (has-key? stops tag) (set i 0))
+      (-- i))
+    found)
+  (defn open [tag attrs self-closing?]
+    (set started? true)
+    (when html?
+      (when (has-key? p-closers tag)
+        (when-let [i (find-open |(implied "p"))] (close-to i)))
+      (when (and (has-key? headings tag) (has-key? headings ((top) 0)))
+        (close-top))
+      (when-let [[tags stops] (and (not= tag "p") (get implied tag))]
+        (when-let [i (find-open tags stops)] (close-to i))))
+    (if (or self-closing? (and html? (has-key? void-tags tag)))
+      (add {:tag tag :attrs attrs :children []})
+      (array/push! stack ![tag attrs ![]])))
+  ; An end tag closes the nearest open element with its name, and every
+  ; element opened after it. An end tag with no open element is ignored.
+  (defn close [tag]
+    (var i (dec (length stack)))
+    (while (and (> i 0) (not= tag ((stack i) 0))) (-- i))
+    (when (> i 0) (close-to i)))
+  (defn at? [pos prefix]
+    (= prefix (string/slice text pos (min len (+ pos (length prefix))))))
+  (var pos 0)
+  (while (< pos len)
+    (def lt (or (string/find "<" text pos) len))
+    (add-text (string/slice text pos lt))
+    (set pos lt)
+    (when (< pos len)
+      (def c (get text (inc pos)))
+      (cond
+        (at? pos "<!--")
+        (set pos (if-let [end (string/find "-->" text (+ pos 4))] (+ end 3) len))
+
+        (at? pos "<![CDATA[")
+        (let [end (or (string/find "]]>" text (+ pos 9)) len)]
+          (add (string/slice text (+ pos 9) end))
+          (set pos (min len (+ end 3))))
+
+        (or (= c (chr "!")) (= c (chr "?")))
+        (set pos (if-let [end (string/find ">" text pos)] (inc end) len))
+
+        (= c (chr "/"))
+        (if-let [[name end] (peg/match end-tag text pos)]
+          (do (close (fold name)) (set pos end))
+          (do (add-text "<") (++ pos)))
+
+        (if-let [[name attrs self-closing? end] (and c (peg/match start-tag text pos))]
+          (let [tag (fold name)
+                attrs (reduce (fn [m [k v]] (assoc m (fold k) (decode (or v ""))))
+                              {} attrs)]
+            (set pos end)
+            (open tag attrs self-closing?)
+            (when (and html? (not self-closing?) (has-key? raw-tags tag))
+              (def stop (or (string/find (string "</" tag) lower pos) len))
+              (def raw (string/slice text pos stop))
+              (when (> (length raw) 0)
+                (add (if (has-key? #{"title" "textarea"} tag) (decode raw) raw)))
+              (set pos stop)))
+          (do (add-text "<") (++ pos))))))
+  (close-to 1)
+  (def [tag attrs children] (first stack))
+  {:tag tag :attrs attrs :children (vec children)})
+
+; Reading the tree
+
+(defn element?
+  "Returns true if node is an element rather than text."
+  [node]
+  (map? node))
+
+(defn text
+  """
+  Returns the text of node and its descendants, joined, as Nokogiri's
+  `content` does.
+  """
+  [node]
+  (if (string? node)
+    node
+    (do
+      (def buf !"")
+      (defn walk [n]
+        (if (string? n)
+          (buffer/push! buf n)
+          (each c (n :children) (walk c))))
+      (walk node)
+      (string buf))))
