@@ -6,4 +6,5 @@
  :license "MIT"
  :url "https://github.com/pyrmont/colander"
  :exes [{:type :native :name "colander" :entry "lib/cli.wattle"}]
- :libs [{:type :native :name "colander_http" :root "src/http.zig" :for ["colander"]}]}
+ :libs [{:type :native :name "colander_http" :root "src/http.zig" :for ["colander"]}]
+ :docs [{:type :man :files ["man/man1/colander.1"] :for ["colander"]}]}

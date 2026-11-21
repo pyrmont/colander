@@ -1,0 +1,296 @@
+---
+Title: COLANDER(1)
+Authors: Michael Camilleri
+Date: 2026-11-21
+Project: Colander
+Version: DEVEL
+---
+
+NAME
+====
+
+**colander** - make Atom and RSS feeds from web pages and other feeds
+
+SYNOPSIS
+========
+
+**colander** [**-r** _dir_ | **--rules-dir** _dir_] [**-o** _dir_ | **--output-dir** _dir_]
+         [**-O** | **--stdout**] [**-i** _name_ | **--include** _name_]...
+
+**colander** [**-r** _dir_] [**-o** _dir_] [**-O**] [**-e** _name_ | **--exclude** _name_]...
+
+**colander** [**-v** | **--version**]
+
+**colander** [**-h** | **--help**]
+
+DESCRIPTION
+===========
+
+**colander** makes a feed for each rules file in the rules directory. A rules
+file names a page, which can be HTML or XML (such as another feed), and says
+what to extract from it, how to change what it extracts and which entries to
+keep. **colander** fetches the page, extracts the feed's information and
+entries, and writes the feed as Atom or as RSS for podcasts.
+
+The feed for ``<rules-dir>/<name>.wattle`` is written to
+``<output-dir>/<name>.xml``. It is written to a temporary file in the output
+directory and renamed into place, so a reader never sees part of a feed. The
+output directory is created if it does not exist.
+
+Each feed is made in turn. A feed that fails, because its page cannot be
+fetched, its status is not 2xx or its rules file has an error, is reported
+on standard error as ``colander: <name>: <reason>`` and its file is left as
+it was. The other feeds are still made. A feed with no entries is written,
+with a warning, since that usually means that its page has changed.
+
+**colander** prints nothing else, so it can be run from cron.
+
+OPTIONS
+=======
+
+- **-r** _dir_ | **--rules-dir** _dir_:
+  The directory of rules files. This defaults to ``rules``.
+
+- **-o** _dir_ | **--output-dir** _dir_:
+  The directory to write feeds to. This defaults to ``outputs``.
+
+- **-O** | **--stdout**:
+  Write each feed to standard output instead of to a file.
+
+- **-i** _name_ | **--include** _name_:
+  Make only the feed for the rules file _name_ (without ``.wattle``). Can be
+  given more than once; the feeds are made in the order given.
+
+- **-e** _name_ | **--exclude** _name_:
+  Make every feed except the one for _name_. Can be given more than once.
+  It cannot be used with **--include**.
+
+- **-v** | **--version**:
+  Print the version and exit.
+
+- **-h** | **--help**:
+  Print a help message and exit.
+
+A name given with **--include** or **--exclude** that has no rules file is an
+error, and no feed is made.
+
+RULES FILES
+===========
+
+A rules file is a Wattle program that defines ``feed``, a map. It is
+compiled in an environment of its own, so it can define other bindings for
+its own use, and it can use Wattle's standard library. Of **colander**'s own
+functions it has ``extract``, ``header`` and those that begin with
+``markup/``, ``date/``, ``select/`` and ``template/``.
+
+A rules file is code: **colander** runs it. Use rules files that you have
+written or read.
+
+The keys of ``feed`` are:
+
+- ``:url``:
+  The page to fetch, a string that begins with ``http://`` or ``https://``.
+  Required.
+
+- ``:format``:
+  How to read the page, ``:html`` (the default) or ``:xml``.
+
+- ``:template``:
+  How to write the feed: ``:atom`` (the default), ``:podcast``, or a
+  function. See `<TEMPLATES>`.
+
+- ``:info``:
+  The feed's own elements, as a vector of ``[name value]`` pairs.
+
+- ``:entries``:
+  An ``extract`` rule that selects each entry's element in the page.
+
+- ``:entry``:
+  Each entry's elements, as a vector of ``[name value]`` pairs.
+
+- ``:keep?``:
+  A function of an entry that returns true to keep it.
+
+- ``:transform``:
+  A function from an entry to the entry to write.
+
+- ``:headers``:
+  A map of request headers to send, such as ``{"User-Agent" "..."}``.
+
+- ``:timeout``:
+  The seconds to wait for the page. This defaults to 30.
+
+A name is a keyword, such as ``:title`` or ``:itunes:image``; it is the name
+of the element written. A value is a string, an ``extract`` rule or a
+``header`` rule. The elements are written in the order of the pairs.
+
+With ``:entries``, the rules in ``:entry`` select within each entry's
+element. Without it, each rule in ``:entry`` selects every match in the page,
+and the first match of each goes to the first entry, the second to the
+second, and so on.
+
+``:keep?`` and ``:transform`` are given each entry as a map of names to
+strings, such as ``{:title "..." :link "..."}``. ``:keep?`` is called first.
+A transform can change, add or remove values. Values that it adds are
+written after the others, in order of name.
+
+EXTRACTING
+==========
+
+``(extract selector & options)`` returns a rule that takes a value from the
+first element that _selector_ matches. The selector is searched for in the
+entry's element, or in the whole page for a rule in ``:info`` or with
+``:absolute``. An empty selector is the entry's element itself. The options
+are:
+
+- ``:content``:
+  What to take from the element: ``:text`` (the default, its text with the
+  surrounding whitespace removed), ``:inner-html`` (its contents as markup),
+  or ``:html`` or ``:xml`` (the element itself as markup, such as an
+  ``enclosure``).
+
+- ``:attr``:
+  The name of an attribute to take instead, such as ``"href"``.
+
+- ``:absolute``:
+  When true, search the whole page rather than the entry's element.
+
+- ``:process``:
+  A function of the value and the rule that returns a string.
+
+- ``:prefix``, ``:suffix``:
+  Strings to add before and after the value.
+
+- ``:type``:
+  ``:datetime`` reads the value as a date and writes it in the form of
+  RFC 3339 (see `<DATES>`), or as an empty string if it is not a date.
+  ``:cdata`` writes the value in a CDATA section, for a value that is HTML.
+
+The steps are applied in that order: content, process, prefix and suffix,
+type. A rule that matches nothing gives an empty string, without its prefix
+or suffix.
+
+``(header name & options)`` returns a rule that takes the value of the
+response header _name_, in any case, such as ``"Last-Modified"``. It takes
+``:process``, ``:prefix``, ``:suffix`` and ``:type``.
+
+SELECTORS
+=========
+
+Selectors are a subset of CSS: type selectors (``div``, ``*``), ``.class``,
+``#id``, ``[attr]``, ``[attr=v]``, ``[attr~=v]``, ``[attr^=v]``,
+``[attr$=v]`` and ``[attr*=v]``, the descendant combinator (a space) and the
+child combinator (``>``), and lists separated by ``,``. ``ns|type`` matches
+the element ``ns:type`` in XML, such as ``itunes|image``. Any other selector
+is an error.
+
+HTML is read leniently, and tag and attribute names are lowercased, so write
+HTML selectors in lower case. XML names are kept as written.
+
+TEMPLATES
+=========
+
+Each value is written according to its rule: escaped, in a CDATA section
+(``:type :cdata``) or as it is (``:content :html`` or ``:xml``).
+
+``:atom`` writes an Atom feed with the ``:info`` elements and an ``entry``
+element for each entry. ``:author`` is written as
+``<author><name>...</name></author>`` and ``:link`` as
+``<link href="..." rel="alternate" />``. A CDATA value in ``title``,
+``subtitle``, ``summary``, ``content`` or ``rights`` is marked
+``type="html"``.
+
+``:podcast`` writes an RSS 2.0 feed with the iTunes namespace: a ``channel``
+with the ``:info`` elements and an ``item`` for each entry.
+``:itunes:category`` is written as ``<itunes:category text="..."/>``,
+``:itunes:image`` as ``<itunes:image href="..."/>`` and ``:guid`` with
+``isPermaLink="false"``.
+
+A function given as ``:template`` is called with a map of ``:info`` and
+``:entries``. ``:info`` is a vector of ``[name value mode]`` triples, where
+mode is ``:text``, ``:cdata`` or ``:markup``, and ``:entries`` is a vector of
+such vectors. It returns the feed as a string.
+
+DATES
+=====
+
+``:type :datetime`` reads dates written as ``2026-11-23`` or
+``2026-11-23T08:00:00+09:00``, ``Mon, 23 Nov 2026 08:00:00 +0900`` (or with a
+zone such as ``GMT``), ``November 23, 2026``, ``23 November 2026`` and
+``11/23/2026``. Months and days of the week can be written in full or in
+three letters. A date with an offset keeps it; a date without one is in the
+local time zone, and a date without a time is midnight.
+
+FETCHING
+========
+
+**colander** sends a GET request with the User-Agent
+``Colander/<version> (+https://github.com/pyrmont/colander)``, which
+``:headers`` can replace. It follows up to five redirects, accepts gzip and
+deflate, and reads at most 16 MiB of a response. It uses the system's
+certificates for HTTPS.
+
+EXIT STATUS
+===========
+
+**colander** exits with 0 if every feed was made, and with 1 if any feed
+failed, its options are invalid or the rules directory cannot be read.
+
+EXAMPLES
+========
+
+A rules file, ``rules/essays.wattle``, for a page that lists essays:
+
+````
+(def- url "https://example.org/essays.html")
+
+(def- link (extract "a" :attr "href" :prefix "https://example.org"))
+
+(def feed
+  {:url url
+   :info [[:id url]
+          [:updated (header "Last-Modified" :type :datetime)]
+          [:title "Essays"]
+          [:author "A. Writer"]]
+   :entries (extract "ul.posts > li")
+   :entry [[:id link]
+           [:title (extract "a")]
+           [:link link]]})
+````
+
+A rules file that filters another feed and changes its titles:
+
+````
+(def feed
+  {:url "https://example.org/podcast.xml"
+   :format :xml
+   :template :podcast
+   :info [[:title "One Segment"]
+          [:link "https://example.org/"]]
+   :entries (extract "item")
+   :entry [[:title (extract "title")]
+           [:description (extract "description" :type :cdata)]
+           [:enclosure (extract "enclosure" :content :xml)]
+           [:guid (extract "guid")]]
+   :keep? (fn [e] (string/find "Segment" (e :title)))
+   :transform (fn [e]
+                (assoc e :title (string/replace-all " | Show" "" (e :title))))})
+````
+
+Make every feed in ``rules`` and write them to ``/var/www/feeds``:
+
+````
+$ colander -o /var/www/feeds
+````
+
+Run every two hours from cron:
+
+````
+0 */2 * * * cd /srv/feeds && $HOME/bin/colander -o public
+````
+
+Check one feed without writing a file:
+
+````
+$ colander -O -i essays
+````
